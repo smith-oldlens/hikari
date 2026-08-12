@@ -22,10 +22,11 @@ function whenQueueBelow(getSize, target, max) {
 // ===== 状態 =====
 const project = {
   aspect: '16:9',
+  fit: 'contain',      // 'contain'=切れないように収める / 'cover'=画面いっぱい（切り抜き）
   clips: [],           // {id, file, url, video, name, dur, w, h, start, end, thumb}
-  lut: 'hikari',       // 'hikari' | 'none' | 'file'
+  lut: 'hikari',       // 'hikari' | 'none' | 'file' | 'mine'
   lutFileData: null,   // {data:Uint8Array, n}
-  adjust: { exposure: 0, contrast: 0, saturation: 0, fade: 0, grain: 0.12, letterbox: true, strength: 0.85 },
+  adjust: { exposure: 0, contrast: 0, saturation: 0, fade: 0, grain: 0.12, letterbox: true, strength: 0.85, effect: 0 },
   music: null,         // {name, arrayBuffer?|audioBuffer?, volume}
 };
 let selId = null;
@@ -76,13 +77,17 @@ uv = p; gl_Position = vec4(p.x*2.-1., 1.-p.y*2., 0., 1.); }`;
     const fs = `#version 300 es
 precision mediump float; precision mediump sampler3D;
 uniform sampler2D uFrame; uniform sampler3D uLut;
-uniform float uStrength, uExposure, uContrast, uSaturation, uFade, uGrain, uLetterbox, uTime, uLutN;
+uniform float uStrength, uExposure, uContrast, uSaturation, uFade, uGrain, uLetterbox, uTime, uLutN, uEffect;
 uniform int uRot; uniform vec2 uVis;
 in vec2 uv; out vec4 o;
 void main(){
   if (uv.y < uLetterbox || uv.y > 1.0 - uLetterbox) { o = vec4(0.,0.,0.,1.); return; }
   vec2 e = 0.5 + (uv - 0.5) * uVis;
+  if (uEffect > 0.5) {
+    e += vec2(sin(uTime*0.37)*0.0025 + sin(uTime*0.11)*0.0015, cos(uTime*0.23)*0.002);
+  }
   vec2 s = uRot==0 ? e : uRot==90 ? vec2(e.y, 1.0-e.x) : uRot==180 ? 1.0-e : vec2(1.0-e.y, e.x);
+  if (s.x < 0. || s.x > 1. || s.y < 0. || s.y > 1.) { o = vec4(0.,0.,0.,1.); return; }
   vec3 c = texture(uFrame, s).rgb;
   c *= exp2(uExposure);
   c = (c - 0.5) * (1.0 + uContrast) + 0.5;
@@ -91,6 +96,15 @@ void main(){
   c = mix(c, c * 0.82 + 0.13, uFade);
   vec3 g = texture(uLut, clamp(c,0.,1.) * ((uLutN-1.0)/uLutN) + (0.5/uLutN)).rgb;
   c = mix(c, g, uStrength);
+  if (uEffect > 0.5) {
+    float r2 = distance(uv, vec2(0.5));
+    c *= 1.0 - 0.35 * smoothstep(0.45, 0.85, r2);
+    c *= 1.0 + 0.05 * sin(uTime*0.9) + 0.03 * sin(uTime*2.3);
+    float gn = fract(sin(dot(floor(gl_FragCoord.xy/2.5) + uTime, vec2(12.9898,78.233))) * 43758.5453);
+    c += (gn - 0.5) * 0.09;
+    float dust = fract(sin(dot(floor(vec2(e.x*24., e.y*14.)) + floor(uTime/3.), vec2(41.3,289.1))) * 33758.5);
+    if (dust > 0.996) c += 0.25;
+  }
   float nz = fract(sin(dot(gl_FragCoord.xy + uTime, vec2(12.9898,78.233))) * 43758.5453);
   c += (nz - 0.5) * uGrain;
   o = vec4(clamp(c, 0., 1.), 1.0);
@@ -107,7 +121,7 @@ void main(){
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('リンク: ' + gl.getProgramInfoLog(p));
     gl.useProgram(p);
     this.u = {};
-    for (const n of ['uStrength','uExposure','uContrast','uSaturation','uFade','uGrain','uLetterbox','uTime','uLutN','uRot','uVis'])
+    for (const n of ['uStrength','uExposure','uContrast','uSaturation','uFade','uGrain','uLetterbox','uTime','uLutN','uRot','uVis','uEffect'])
       this.u[n] = gl.getUniformLocation(p, n);
     gl.uniform1i(gl.getUniformLocation(p, 'uFrame'), 0);
     gl.uniform1i(gl.getUniformLocation(p, 'uLut'), 1);
@@ -137,8 +151,11 @@ void main(){
     const ow = this.cv.width, oh = this.cv.height;
     const rw = rot % 180 === 0 ? srcW : srcH, rh = rot % 180 === 0 ? srcH : srcW;
     const arOut = ow / oh, arSrc = rw / rh;
-    const vis = arSrc > arOut ? [arOut / arSrc, 1] : [1, arSrc / arOut];
+    const vis = project.fit === 'cover'
+      ? (arSrc > arOut ? [arOut / arSrc, 1] : [1, arSrc / arOut])   // 画面いっぱい（はみ出しを切る）
+      : (arSrc > arOut ? [1, arSrc / arOut] : [arOut / arSrc, 1]);  // 切れないように収める（余白は黒）
     gl.uniform2f(this.u.uVis, vis[0], vis[1]);
+    gl.uniform1f(this.u.uEffect, a.effect);
     gl.uniform1i(this.u.uRot, rot);
     gl.uniform1f(this.u.uStrength, project.lut === 'none' ? 0 : a.strength);
     gl.uniform1f(this.u.uExposure, a.exposure);
@@ -308,7 +325,7 @@ function showFrame(clip) {
 let lastSrc = null;
 function drawStill(clip) {
   if (clip.video.readyState >= 2)
-    preview.draw(clip.video, clip.video.videoWidth, clip.video.videoHeight, 0, performance.now() / 50);
+    preview.draw(clip.video, clip.video.videoWidth, clip.video.videoHeight, 0, performance.now() * 0.03);
 }
 function redraw() {
   if (playing) return;
@@ -388,7 +405,7 @@ function loop() {
   const c = project.clips[playIdx];
   if (c) {
     const v = c.video;
-    preview.draw(v, v.videoWidth, v.videoHeight, 0, performance.now() / 50);
+    preview.draw(v, v.videoWidth, v.videoHeight, 0, performance.now() * 0.03);
     updateTimeLabel();
     checkAdvance();
   }
@@ -634,6 +651,14 @@ for (const [id, fn] of Object.entries(sliderMap)) {
   };
 }
 $('uLetterbox').onchange = () => { project.adjust.letterbox = $('uLetterbox').checked; redraw(); };
+$('fitSel').onchange = () => { project.fit = $('fitSel').value; redraw(); };
+document.querySelectorAll('#fxChips .chip').forEach(chip => {
+  chip.onclick = () => {
+    project.adjust.effect = parseInt(chip.dataset.fx);
+    document.querySelectorAll('#fxChips .chip').forEach(c => c.classList.toggle('on', c === chip));
+    redraw();
+  };
+});
 
 document.querySelectorAll('#lutChips .chip').forEach(chip => {
   chip.onclick = () => {

@@ -111,6 +111,13 @@
       </select>
       <span class="hint">取り込み後も自由に調整できます</span>
     </div>
+    <div class="row">
+      <label>収め方</label>
+      <select id="fitSel">
+        <option value="contain" selected>切れないように収める</option>
+        <option value="cover">画面いっぱい（切り抜き）</option>
+      </select>
+    </div>
     <div id="clipEdit" style="display:none">
       <div class="row">
         <label>並び</label>
@@ -132,6 +139,11 @@
       <button class="chip" data-lut="none">なし</button>
       <button class="chip" data-lut="file">＋ 自分のLUT (.cube)</button>
     </div>
+    <div class="chips" id="fxChips" style="margin-top:10px">
+      <button class="chip on" data-fx="0">質感なし</button>
+      <button class="chip" data-fx="1">8mmフィルム風</button>
+    </div>
+    <p class="hint" style="margin:10px 0 0">色と質感は、作品のすべてのクリップに一括で当たります。</p>
     <div class="row"><label>強さ</label><input type="range" id="uStrength" min="0" max="100" value="85"><output>85</output></div>
     <div class="row"><label>露出</label><input type="range" id="uExposure" min="-100" max="100" value="0"><output>0</output></div>
     <div class="row"><label>コントラスト</label><input type="range" id="uContrast" min="-100" max="100" value="0"><output>0</output></div>
