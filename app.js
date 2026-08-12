@@ -166,10 +166,26 @@ void main(){
 const preview = new GLPipe($('previewCanvas'));
 
 function applyLutSelection(pipe) {
-  if (project.lut === 'file' && project.lutFileData) pipe.setLut(project.lutFileData);
+  if (project.lut === 'mine' && project.mineLutData) pipe.setLut(project.mineLutData);
+  else if (project.lut === 'file' && project.lutFileData) pipe.setLut(project.lutFileData);
   else if (project.lut === 'none') pipe.setLut(makeIdentityLut());
   else pipe.setLut(makeHikariLut());
 }
+
+// 「自分の色」LUT（LightroomプリセットのLUT化）をアプリと同じ場所から読み込み、既定にする
+(async () => {
+  try {
+    const r = await fetch('./jibun-no-iro.cube');
+    if (!r.ok) return;
+    project.mineLutData = parseCube(await r.text());
+    const chip = document.querySelector('#lutChips .chip[data-lut=mine]');
+    chip.style.display = '';
+    project.lut = 'mine';
+    document.querySelectorAll('#lutChips .chip').forEach(c => c.classList.toggle('on', c === chip));
+    applyLutSelection(preview);
+    redraw();
+  } catch (e) { }
+})();
 
 // ===== .cube 読み込み =====
 function parseCube(text) {
@@ -622,6 +638,7 @@ $('uLetterbox').onchange = () => { project.adjust.letterbox = $('uLetterbox').ch
 document.querySelectorAll('#lutChips .chip').forEach(chip => {
   chip.onclick = () => {
     if (chip.dataset.lut === 'file' && !project.lutFileData) { $('lutFileInput').click(); return; }
+    if (chip.dataset.lut === 'mine' && !project.mineLutData) return;
     project.lut = chip.dataset.lut;
     document.querySelectorAll('#lutChips .chip').forEach(c => c.classList.toggle('on', c === chip));
     applyLutSelection(preview);
