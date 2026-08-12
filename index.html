@@ -1,7 +1,180 @@
 <!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ひかりを編む</title></head>
-<body style="font-family:-apple-system,'Hiragino Sans',sans-serif;padding:24px;">
-<h1 style="font-size:20px;">ひかりを編む（開発中）</h1>
-<p>短い動画と音楽で映像作品をつくるアプリ。</p>
-<p><a href="./kensho/">技術検証ページへ</a></p>
-</body></html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111110">
+<title>ひかりを編む</title>
+<style>
+  :root { --bg:#111110; --panel:#1c1c1a; --card:#262624; --line:#2f2f2d; --fg:#f4f3ef; --sub:#8a8a85; --acc:#f4f3ef; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system,"Hiragino Sans",sans-serif; user-select:none; }
+  #app { max-width:560px; margin:0 auto; min-height:100dvh; display:flex; flex-direction:column; }
+
+  header { display:flex; align-items:center; justify-content:space-between; padding:12px 14px 8px; gap:10px; }
+  header .ttl { font-size:15px; font-weight:600; }
+  header select { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 8px; font-size:13px; }
+
+  #previewWrap { padding:0 14px; }
+  #previewBox { position:relative; width:100%; background:#000; border-radius:10px; overflow:hidden; }
+  #previewCanvas { display:block; width:100%; height:100%; }
+  #emptyHint { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--sub); font-size:13px; text-align:center; padding:0 20px; }
+
+  #transport { display:flex; align-items:center; justify-content:center; gap:16px; padding:8px 0 4px; }
+  #playBtn { width:46px; height:46px; border-radius:50%; border:none; background:var(--acc); color:#191917; font-size:18px; cursor:pointer; }
+  #timeLabel { font-size:12px; color:var(--sub); min-width:88px; text-align:center; }
+
+  #clipStrip { display:flex; gap:8px; overflow-x:auto; padding:6px 14px 10px; align-items:stretch; }
+  #clipStrip::-webkit-scrollbar { display:none; }
+  .clipCard { flex:none; width:86px; border-radius:8px; overflow:hidden; background:var(--card); border:2px solid transparent; cursor:pointer; position:relative; }
+  .clipCard.sel { border-color:var(--acc); }
+  .clipCard img { width:100%; height:52px; object-fit:cover; display:block; background:#000; }
+  .clipCard .d { font-size:11px; color:var(--sub); padding:2px 6px 4px; }
+  .clipCard .n { position:absolute; top:2px; left:5px; font-size:10px; color:#fff; text-shadow:0 0 3px #000; }
+  #addCard { flex:none; width:60px; border:1px dashed var(--sub); border-radius:8px; color:var(--sub); display:flex; align-items:center; justify-content:center; font-size:22px; cursor:pointer; min-height:72px; }
+
+  nav { display:flex; border-top:1px solid var(--line); background:var(--panel); }
+  nav button { flex:1; background:none; border:none; color:var(--sub); font-size:11px; padding:8px 0 10px; cursor:pointer; }
+  nav button .ic { display:block; font-size:17px; margin-bottom:2px; }
+  nav button.on { color:var(--fg); font-weight:600; }
+
+  .panel { display:none; background:var(--panel); padding:12px 16px 16px; min-height:170px; }
+  .panel.on { display:block; }
+  .row { display:flex; align-items:center; gap:10px; margin:10px 0; }
+  .row label { font-size:12px; color:var(--sub); flex:none; width:5.5em; }
+  .row output { font-size:12px; color:var(--sub); flex:none; width:3em; text-align:right; }
+  input[type=range] { flex:1; accent-color:var(--acc); min-width:0; }
+  .btn { background:var(--card); border:1px solid var(--line); color:var(--fg); border-radius:9px; padding:9px 14px; font-size:13px; cursor:pointer; }
+  .btn.primary { background:var(--acc); color:#191917; border-color:var(--acc); font-weight:600; }
+  .btn:disabled { opacity:.4; }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; }
+  .chip { background:var(--card); border:1px solid var(--line); color:var(--fg); border-radius:16px; padding:6px 13px; font-size:12px; cursor:pointer; }
+  .chip.on { background:var(--acc); color:#191917; border-color:var(--acc); font-weight:600; }
+  .hint { font-size:11px; color:var(--sub); line-height:1.6; }
+  select { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 8px; font-size:13px; }
+
+  #exportProg { font-size:12px; color:var(--sub); margin:8px 0; min-height:1.3em; }
+  #progBar { height:4px; background:var(--card); border-radius:2px; overflow:hidden; margin:6px 0; }
+  #progFill { height:100%; width:0%; background:var(--acc); }
+  #outVideo { width:100%; border-radius:10px; background:#000; margin-top:8px; display:none; }
+  #log { font-size:11px; color:#e08a86; white-space:pre-wrap; word-break:break-all; padding:0 16px 12px; }
+  #devbar { display:none; gap:8px; padding:8px 14px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span class="ttl">ひかりを編む</span>
+    <span style="display:flex; gap:8px; align-items:center;">
+      <select id="aspectSel">
+        <option value="16:9">16:9 よこ</option>
+        <option value="9:16">9:16 たて</option>
+        <option value="4:5">4:5</option>
+      </select>
+      <button class="btn primary" id="goExportBtn">書き出し</button>
+    </span>
+  </header>
+
+  <div id="previewWrap">
+    <div id="previewBox">
+      <canvas id="previewCanvas" width="960" height="540"></canvas>
+      <div id="emptyHint">下の「＋」から動画を追加してください<br>（最初から「ひかり」の色が当たります）</div>
+    </div>
+  </div>
+
+  <div id="transport">
+    <span id="timeLabel">0:00 / 0:00</span>
+    <button id="playBtn">▶</button>
+    <span style="min-width:88px"></span>
+  </div>
+
+  <div id="clipStrip"><div id="addCard">＋</div></div>
+  <input type="file" id="fileInput" accept="video/mp4,video/quicktime,video/*" multiple hidden>
+  <input type="file" id="lutFileInput" accept=".cube" hidden>
+  <input type="file" id="musicFileInput" accept="audio/*" hidden>
+
+  <div id="devbar">
+    <button class="btn" id="devClip">サンプルクリップ追加</button>
+    <button class="btn" id="devMusic">サンプル音楽</button>
+  </div>
+
+  <div style="flex:1"></div>
+
+  <div class="panel" id="panel-clips">
+    <div class="row">
+      <label>取り込み長さ</label>
+      <select id="presetSel">
+        <option value="2">先頭から2秒</option>
+        <option value="3" selected>先頭から3秒</option>
+        <option value="5">先頭から5秒</option>
+        <option value="0">全部</option>
+      </select>
+      <span class="hint">取り込み後も自由に調整できます</span>
+    </div>
+    <div id="clipEdit" style="display:none">
+      <div class="row">
+        <label>並び</label>
+        <button class="btn" id="moveL">◀ 前へ</button>
+        <button class="btn" id="moveR">後ろへ ▶</button>
+        <span style="flex:1"></span>
+        <button class="btn" id="delClip">削除</button>
+      </div>
+      <div class="row"><label>使う範囲</label><input type="range" id="trimStart" min="0" max="10" step="0.1" value="0"><output id="trimStartOut">0.0</output></div>
+      <div class="row"><label>〜</label><input type="range" id="trimEnd" min="0" max="10" step="0.1" value="3"><output id="trimEndOut">3.0</output></div>
+    </div>
+    <p class="hint" id="clipHint">クリップをタップすると、並び替え・使う範囲の調整ができます。</p>
+  </div>
+
+  <div class="panel on" id="panel-color">
+    <div class="chips" id="lutChips">
+      <button class="chip on" data-lut="hikari">ひかり</button>
+      <button class="chip" data-lut="none">なし</button>
+      <button class="chip" data-lut="file">＋ 自分のLUT (.cube)</button>
+    </div>
+    <div class="row"><label>強さ</label><input type="range" id="uStrength" min="0" max="100" value="85"><output>85</output></div>
+    <div class="row"><label>露出</label><input type="range" id="uExposure" min="-100" max="100" value="0"><output>0</output></div>
+    <div class="row"><label>コントラスト</label><input type="range" id="uContrast" min="-100" max="100" value="0"><output>0</output></div>
+    <div class="row"><label>彩度</label><input type="range" id="uSaturation" min="-100" max="100" value="0"><output>0</output></div>
+    <div class="row"><label>フェード</label><input type="range" id="uFade" min="0" max="100" value="0"><output>0</output></div>
+    <div class="row"><label>グレイン</label><input type="range" id="uGrain" min="0" max="100" value="12"><output>12</output></div>
+    <div class="row"><label>レターボックス</label><input type="checkbox" id="uLetterbox" checked style="width:18px;height:18px;accent-color:var(--acc)"></div>
+  </div>
+
+  <div class="panel" id="panel-music">
+    <div class="row">
+      <button class="btn" id="musicBtn">音楽を選ぶ</button>
+      <span class="hint" id="musicName">未選択</span>
+    </div>
+    <div class="row"><label>音量</label><input type="range" id="musicVol" min="0" max="100" value="70"><output>70</output></div>
+    <p class="hint">曲は自動でフェードイン・フェードアウトします。作品の長さで自動的に切れます。</p>
+  </div>
+
+  <div class="panel" id="panel-export">
+    <div class="row">
+      <label>解像度</label>
+      <select id="resSel"><option value="1080">1080p</option><option value="2160">4K</option></select>
+      <span style="flex:1"></span>
+      <button class="btn primary" id="runExport">書き出す</button>
+    </div>
+    <div id="progBar"><div id="progFill"></div></div>
+    <div id="exportProg"></div>
+    <video id="outVideo" controls playsinline></video>
+    <div class="row" id="saveRow" style="display:none">
+      <a class="btn" id="dlLink" download="ひかりを編む.mp4">保存</a>
+      <button class="btn" id="shareBtn">共有</button>
+    </div>
+  </div>
+
+  <nav>
+    <button data-tab="clips"><span class="ic">🎞</span>クリップ</button>
+    <button data-tab="color" class="on"><span class="ic">🎨</span>色</button>
+    <button data-tab="music"><span class="ic">🎵</span>音楽</button>
+    <button data-tab="export"><span class="ic">↑</span>書き出し</button>
+  </nav>
+
+  <pre id="log"></pre>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.3/dist/mp4box.all.min.js" crossorigin="anonymous"></script>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
