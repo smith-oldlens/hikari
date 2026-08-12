@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ひかりを編む — 技術検証（Phase 0）</title>
+<style>
+  body { font-family: -apple-system, "Hiragino Sans", sans-serif; margin: 0 auto; padding: 16px; max-width: 760px; background: #fafaf8; color: #1c1c1a; }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  .sub { color: #6b6b66; font-size: 13px; margin: 0 0 16px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+  button, .filebtn { font-size: 15px; padding: 12px 18px; border-radius: 10px; border: 1px solid #d5d5d0; background: #fff; cursor: pointer; }
+  button.primary { background: #1c1c1a; color: #fff; border-color: #1c1c1a; }
+  .filebtn { display: inline-block; }
+  ul#checks { list-style: none; padding: 0; margin: 12px 0; }
+  ul#checks li { padding: 9px 12px; border-bottom: 1px solid #ececea; font-size: 14px; display: flex; gap: 10px; align-items: baseline; background: #fff; }
+  ul#checks li:first-child { border-radius: 10px 10px 0 0; }
+  ul#checks li:last-child { border-radius: 0 0 10px 10px; border-bottom: none; }
+  .dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: #c9c9c4; position: relative; top: -1px; }
+  .ok .dot { background: #2e9e6b; } .ng .dot { background: #d5504a; } .warn .dot { background: #e0a13c; } .run .dot { background: #4a83d5; }
+  .lbl { flex: none; min-width: 12em; }
+  .det { color: #6b6b66; }
+  #progress { font-size: 13px; color: #4a4a46; min-height: 1.4em; margin: 8px 0; }
+  #media { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+  #glCanvas, #outVideo { max-width: 100%; width: 340px; border-radius: 10px; background: #000; }
+  #log { font-size: 12px; color: #a03a36; white-space: pre-wrap; word-break: break-all; }
+  .cap { font-size: 12px; color: #6b6b66; margin: 2px 0 6px; }
+</style>
+</head>
+<body>
+<h1>ひかりを編む — 技術検証</h1>
+<p class="sub" id="device">読み込み中…</p>
+<div class="row">
+  <button class="primary" id="runBuiltin">内蔵テストを実行</button>
+  <label class="filebtn">動画ファイルで試す<input type="file" id="fileInput" accept="video/*" hidden></label>
+  <button id="copyBtn">結果をコピー</button>
+</div>
+<ul id="checks"></ul>
+<div id="progress"></div>
+<div id="media">
+  <div><div class="cap">LUT適用プレビュー（処理中の絵）</div><canvas id="glCanvas" width="16" height="9"></canvas></div>
+  <div><div class="cap">書き出し結果（タップで再生）</div><video id="outVideo" controls playsinline muted></video></div>
+</div>
+<pre id="log"></pre>
+
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.3/dist/mp4box.all.min.js"></script>
+<script type="module">
+import { Muxer, ArrayBufferTarget } from 'https://esm.sh/mp4-muxer@5';
+
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// キュー待ちはsetTimeoutではなくdequeueイベント駆動にする（背景タブのタイマー
+// スロットリングで処理速度が落ちるのを防ぐ。保険としてsetIntervalも併走）
+function whenQueueBelow(getSize, target, max) {
+  return new Promise(res => {
+    if (getSize() <= max) return res();
+    let iv;
+    const h = () => { if (getSize() <= max) { clearInterval(iv); target.removeEventListener?.('dequeue', h); res(); } };
+    target.addEventListener?.('dequeue', h);
+    iv = setInterval(h, 15);
+  });
+}
+const progress = t => { $('progress').textContent = t; };
+const logErr = t => { $('log').textContent += t + '\n'; };
+window.addEventListener('error', e => logErr('エラー: ' + e.message));
+window.addEventListener('unhandledrejection', e => logErr('エラー: ' + (e.reason?.message || e.reason)));
+
+const CHECKS = [
+  ['api', 'WebCodecs API'],
+  ['dec264', 'H.264 デコード'],
+  ['dechevc', 'HEVC デコード'],
+  ['enc1080', 'H.264 エンコード 1080p'],
+  ['enc4k', 'H.264 エンコード 4K'],
+  ['aac', 'AAC 音声エンコード'],
+  ['gl', 'WebGL2 + 3D LUT'],
+  ['pipeline', '内蔵テスト（変換一周）'],
+  ['file', '実ファイル変換'],
+];
+const state = {};
+for (const [id, label] of CHECKS) {
+  const li = document.createElement('li');
+  li.id = 'c_' + id;
+  li.innerHTML = `<span class="dot"></span><span class="lbl">${label}</span><span class="det">未実行</span>`;
+  $('checks').appendChild(li);
+  state[id] = { label, status: '未実行', detail: '' };
+}
+function setCheck(id, cls, detail) {
+  const li = $('c_' + id);
+  li.className = cls;
+  li.querySelector('.det').textContent = detail;
+  state[id].status = { ok: '対応', ng: '非対応', warn: '注意', run: '実行中' }[cls] || cls;
+  state[id].detail = detail;
+}
+
+$('device').textContent =
+  `${navigator.userAgent} ／ CPU ${navigator.hardwareConcurrency ?? '?'}コア` +
+  (navigator.deviceMemory ? ` ／ メモリ目安 ${navigator.deviceMemory}GB` : '') +
+  ` ／ 画面 ${screen.width}×${screen.height}`;
+
+// ---------- WebGL2 + 3D LUT ----------
+let gl, frameTex, uploadMode = 'direct';
+const LUT_N = 17;
+
+function makeLut() {
+  const d = new Uint8Array(LUT_N * LUT_N * LUT_N * 3);
+  const clamp = v => Math.max(0, Math.min(1, v));
+  let i = 0;
+  for (let z = 0; z < LUT_N; z++) for (let y = 0; y < LUT_N; y++) for (let x = 0; x < LUT_N; x++) {
+    const r = x / (LUT_N - 1), g = y / (LUT_N - 1), b = z / (LUT_N - 1);
+    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let nr = 0.05 + r * 0.90, ng = 0.05 + g * 0.92, nb = 0.07 + b * 0.90;
+    const sh = 1 - lum;
+    nb += sh * 0.05; ng += sh * 0.015; nr += lum * 0.04;
+    const l2 = 0.2126 * nr + 0.7152 * ng + 0.0722 * nb;
+    nr = l2 + (nr - l2) * 0.88; ng = l2 + (ng - l2) * 0.88; nb = l2 + (nb - l2) * 0.88;
+    d[i++] = clamp(nr) * 255; d[i++] = clamp(ng) * 255; d[i++] = clamp(nb) * 255;
+  }
+  return d;
+}
+
+function initGL() {
+  const cv = $('glCanvas');
+  gl = cv.getContext('webgl2');
+  if (!gl) throw new Error('WebGL2が使えない');
+  const vs = `#version 300 es
+out vec2 uv;
+void main(){ vec2 p = vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2));
+uv = p; gl_Position = vec4(p.x*2.-1., 1.-p.y*2., 0., 1.); }`;
+  const fs = `#version 300 es
+precision mediump float; precision mediump sampler3D;
+uniform sampler2D uFrame; uniform sampler3D uLut; uniform float uStrength;
+in vec2 uv; out vec4 o;
+void main(){ vec4 c = texture(uFrame, uv);
+vec3 g = texture(uLut, c.rgb*(${(LUT_N - 1)}.0/${LUT_N}.0) + (0.5/${LUT_N}.0)).rgb;
+o = vec4(mix(c.rgb, g, uStrength), 1.0); }`;
+  const mk = (type, src) => {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('シェーダ: ' + gl.getShaderInfoLog(s));
+    return s;
+  };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, mk(gl.VERTEX_SHADER, vs));
+  gl.attachShader(prog, mk(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error('リンク: ' + gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+
+  frameTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, frameTex);
+  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]])
+    gl.texParameteri(gl.TEXTURE_2D, k, v);
+
+  const lutTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_3D, lutTex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB8, LUT_N, LUT_N, LUT_N, 0, gl.RGB, gl.UNSIGNED_BYTE, makeLut());
+  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE]])
+    gl.texParameteri(gl.TEXTURE_3D, k, v);
+
+  gl.uniform1i(gl.getUniformLocation(prog, 'uFrame'), 0);
+  gl.uniform1i(gl.getUniformLocation(prog, 'uLut'), 1);
+  gl.uniform1f(gl.getUniformLocation(prog, 'uStrength'), 0.85);
+  gl.activeTexture(gl.TEXTURE0);
+}
+
+async function drawFrame(source, w, h) {
+  gl.bindTexture(gl.TEXTURE_2D, frameTex);
+  if (uploadMode === 'direct') {
+    try {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    } catch (e) { uploadMode = 'bitmap'; }
+  }
+  if (uploadMode === 'bitmap') {
+    const bmp = await createImageBitmap(source);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+    bmp.close();
+  }
+  gl.viewport(0, 0, w, h);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+// ---------- 対応チェック ----------
+async function runStaticChecks() {
+  const hasApi = 'VideoDecoder' in window && 'VideoEncoder' in window;
+  const apiDetail = hasApi ? 'VideoDecoder / VideoEncoder あり'
+    : (window.isSecureContext ? 'WebCodecs 非対応'
+      : 'httpで開いたため無効化されています。httpsのURLで開き直してください');
+  setCheck('api', hasApi ? 'ok' : 'ng', apiDetail);
+  if (!hasApi) throw new Error(apiDetail);
+
+  const dec = async cfg => (await VideoDecoder.isConfigSupported(cfg)).supported;
+  const enc = async cfg => (await VideoEncoder.isConfigSupported(cfg)).supported;
+
+  setCheck('dec264', (await dec({ codec: 'avc1.640028', codedWidth: 1920, codedHeight: 1080 })) ? 'ok' : 'ng', '1080p');
+  setCheck('dechevc', (await dec({ codec: 'hvc1.1.6.L123.B0', codedWidth: 1920, codedHeight: 1080 })) ? 'ok' : 'warn', 'スマホ動画の主流コーデック');
+
+  const hw1080 = await enc({ codec: 'avc1.640028', width: 1920, height: 1080, bitrate: 12e6, framerate: 30, hardwareAcceleration: 'prefer-hardware' });
+  const any1080 = hw1080 || await enc({ codec: 'avc1.640028', width: 1920, height: 1080, bitrate: 12e6, framerate: 30 });
+  setCheck('enc1080', any1080 ? 'ok' : 'ng', any1080 ? (hw1080 ? 'ハードウェア' : 'ソフトウェアのみ') : '非対応');
+
+  const hw4k = await enc({ codec: 'avc1.640033', width: 3840, height: 2160, bitrate: 40e6, framerate: 30, hardwareAcceleration: 'prefer-hardware' });
+  const any4k = hw4k || await enc({ codec: 'avc1.640033', width: 3840, height: 2160, bitrate: 40e6, framerate: 30 });
+  setCheck('enc4k', any4k ? 'ok' : 'warn', any4k ? (hw4k ? 'ハードウェア' : 'ソフトウェアのみ') : '非対応（1080p書き出しに限定）');
+
+  try {
+    if (!('AudioEncoder' in window)) throw new Error('AudioEncoder なし');
+    const cfg = { codec: 'mp4a.40.2', sampleRate: 44100, numberOfChannels: 2, bitrate: 128000 };
+    if (!(await AudioEncoder.isConfigSupported(cfg)).supported) throw new Error('AAC構成が未対応');
+    const n = 44100, data = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) { const v = Math.sin(i / n * 2 * Math.PI * 440) * 0.3; data[i] = v; data[n + i] = v; }
+    const ad = new AudioData({ format: 'f32-planar', sampleRate: 44100, numberOfFrames: n, numberOfChannels: 2, timestamp: 0, data });
+    let chunks = 0;
+    const ae = new AudioEncoder({ output: () => chunks++, error: e => logErr('AAC: ' + e.message) });
+    ae.configure(cfg); ae.encode(ad); ad.close();
+    await ae.flush(); ae.close();
+    setCheck('aac', chunks > 0 ? 'ok' : 'ng', `1秒の実エンコード → ${chunks}チャンク`);
+  } catch (e) { setCheck('aac', 'ng', e.message); }
+
+  try { if (!gl) initGL(); setCheck('gl', 'ok', '17×17×17 LUT テクスチャ作成OK'); }
+  catch (e) { setCheck('gl', 'ng', e.message); }
+}
+
+// ---------- mp4box ヘルパー ----------
+function getDescription(mp4, trackId) {
+  const trak = mp4.getTrackById(trackId);
+  for (const entry of trak.mdia.minf.stbl.stsd.entries) {
+    const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
+    if (box) {
+      const s = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
+      box.write(s);
+      return new Uint8Array(s.buffer, 8);
+    }
+  }
+  return null;
+}
+
+async function demux(blob) {
+  const buf = await blob.arrayBuffer();
+  buf.fileStart = 0;
+  const mp4 = MP4Box.createFile();
+  const info = await new Promise((res, rej) => {
+    mp4.onReady = res;
+    mp4.onError = e => rej(new Error('mp4解析失敗: ' + e));
+    mp4.appendBuffer(buf);
+    mp4.flush();
+  });
+  const track = info.videoTracks[0];
+  if (!track) throw new Error('動画トラックが見つからない');
+  let rot = 0;
+  try {
+    const m = mp4.getTrackById(track.id).tkhd.matrix;
+    rot = (Math.round(Math.atan2(m[1] / 65536, m[0] / 65536) * 180 / Math.PI) + 360) % 360;
+  } catch (e) { }
+  const desc = getDescription(mp4, track.id);
+  mp4.setExtractionOptions(track.id, null, { nbSamples: 1000000 });
+  const samples = [];
+  mp4.onSamples = (id, u, s) => samples.push(...s);
+  mp4.start();
+  const want = track.nb_samples;
+  const t0 = performance.now();
+  while (samples.length < want && performance.now() - t0 < 20000) await sleep(50);
+  mp4.stop();
+  if (!samples.length) throw new Error('サンプル抽出に失敗');
+  return { track, samples, desc, rot };
+}
+
+// ---------- 変換一周（デコード→LUT→エンコード→mp4化） ----------
+async function transcode(blob, label, checkId) {
+  const t0 = performance.now();
+  progress(`${label}: 動画を解析中…`);
+  const { track, samples, desc, rot } = await demux(blob);
+
+  const srcW = track.video?.width || track.track_width;
+  const srcH = track.video?.height || track.track_height;
+  const durSec = (samples[samples.length - 1].cts + samples[samples.length - 1].duration - samples[0].cts) / samples[0].timescale;
+  const fps = Math.max(1, Math.min(60, Math.round(samples.length / durSec)));
+
+  let outW = srcW & ~1, outH = srcH & ~1, scaled = false;
+  let encCfg = {
+    codec: (outW >= 3000 || outH >= 1600) ? 'avc1.640033' : 'avc1.640028',
+    width: outW, height: outH,
+    bitrate: outH <= 720 ? 8e6 : outH <= 1080 ? 12e6 : 40e6,
+    framerate: fps,
+  };
+  if (!(await VideoEncoder.isConfigSupported(encCfg)).supported) {
+    const k = Math.min(1920 / outW, 1080 / outH, 1);
+    outW = Math.round(outW * k) & ~1; outH = Math.round(outH * k) & ~1; scaled = true;
+    encCfg = { codec: 'avc1.640028', width: outW, height: outH, bitrate: 12e6, framerate: fps };
+    if (!(await VideoEncoder.isConfigSupported(encCfg)).supported) throw new Error('エンコード構成が見つからない');
+  }
+
+  const decCfg = { codec: track.codec, codedWidth: srcW, codedHeight: srcH };
+  if (desc) decCfg.description = desc;
+  if (!(await VideoDecoder.isConfigSupported(decCfg)).supported)
+    throw new Error(`このコーデックはデコード不可: ${track.codec}`);
+
+  if (!gl) initGL();
+  const cv = $('glCanvas');
+  cv.width = outW; cv.height = outH;
+
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: 'avc', width: outW, height: outH },
+    fastStart: 'in-memory',
+    firstTimestampBehavior: 'offset',
+  });
+  const encoder = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: e => logErr('エンコード: ' + e.message) });
+  encoder.configure(encCfg);
+
+  let processed = 0, encIdx = 0, chain = Promise.resolve();
+  const decoder = new VideoDecoder({
+    output: frame => {
+      chain = chain.then(async () => {
+        await drawFrame(frame, outW, outH);
+        const out = new VideoFrame(cv, { timestamp: frame.timestamp, duration: frame.duration ?? undefined });
+        frame.close();
+        await whenQueueBelow(() => encoder.encodeQueueSize, encoder, 4);
+        encoder.encode(out, { keyFrame: encIdx++ % 48 === 0 });
+        out.close();
+        processed++;
+        if (processed % 12 === 0) progress(`${label}: ${processed}/${samples.length} フレーム処理中…`);
+      });
+    },
+    error: e => logErr('デコード: ' + e.message),
+  });
+  decoder.configure(decCfg);
+
+  for (const s of samples) {
+    await whenQueueBelow(() => decoder.decodeQueueSize, decoder, 8);
+    decoder.decode(new EncodedVideoChunk({
+      type: s.is_sync ? 'key' : 'delta',
+      timestamp: Math.round(s.cts * 1e6 / s.timescale),
+      duration: Math.round(s.duration * 1e6 / s.timescale),
+      data: s.data,
+    }));
+  }
+  await decoder.flush(); decoder.close();
+  await chain;
+  await encoder.flush(); encoder.close();
+  muxer.finalize();
+
+  const outBlob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+  $('outVideo').src = URL.createObjectURL(outBlob);
+  const secs = (performance.now() - t0) / 1000;
+  const detail =
+    `${srcW}×${srcH} ${track.codec} ${durSec.toFixed(1)}秒 → ` +
+    (scaled ? `${outW}×${outH}に縮小して` : '') +
+    `${processed}フレームを${secs.toFixed(1)}秒で処理（${(processed / secs).toFixed(0)}fps／実時間の${(durSec / secs).toFixed(1)}倍速）` +
+    (rot ? `／回転メタデータ ${rot}°を検出` : '／回転メタデータなし');
+  setCheck(checkId, durSec / secs >= 0.5 ? 'ok' : 'warn', detail);
+  progress(`${label}: 完了`);
+}
+
+// ---------- 内蔵テスト用サンプル動画 ----------
+async function makeSynthetic() {
+  const w = 1280, h = 720, fps = 24, total = 72;
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: 'avc', width: w, height: h },
+    fastStart: 'in-memory',
+    firstTimestampBehavior: 'offset',
+  });
+  const enc = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: e => logErr('生成: ' + e.message) });
+  let cfg = { codec: 'avc1.640028', width: w, height: h, bitrate: 6e6, framerate: fps };
+  if (!(await VideoEncoder.isConfigSupported(cfg)).supported) cfg.codec = 'avc1.42e01f';
+  enc.configure(cfg);
+  for (let i = 0; i < total; i++) {
+    const t = i / total;
+    ctx.fillStyle = `hsl(${200 + t * 40}, 30%, ${70 - t * 15}%)`;
+    ctx.fillRect(0, 0, w, h * 0.62);
+    ctx.fillStyle = `hsl(${90 + t * 20}, 22%, ${38 - t * 8}%)`;
+    ctx.fillRect(0, h * 0.62, w, h * 0.38);
+    ctx.fillStyle = `hsl(${40 + t * 10}, 80%, 82%)`;
+    ctx.beginPath();
+    ctx.arc(w * (0.15 + t * 0.7), h * (0.35 - Math.sin(t * Math.PI) * 0.15), 46, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.font = 'bold 64px sans-serif';
+    ctx.fillText(String(i + 1), 40, h - 40);
+    const f = new VideoFrame(cv, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) });
+    await whenQueueBelow(() => enc.encodeQueueSize, enc, 4);
+    enc.encode(f, { keyFrame: i % 24 === 0 });
+    f.close();
+    if (i % 12 === 0) progress(`サンプル動画を生成中… ${i}/${total}`);
+  }
+  await enc.flush(); enc.close(); muxer.finalize();
+  return new Blob([muxer.target.buffer], { type: 'video/mp4' });
+}
+
+// ---------- ボタン ----------
+let running = false;
+$('runBuiltin').addEventListener('click', async () => {
+  if (running) return; running = true;
+  try {
+    setCheck('pipeline', 'run', '実行中…');
+    await runStaticChecks();
+    const sample = await makeSynthetic();
+    await transcode(sample, '内蔵テスト', 'pipeline');
+  } catch (e) {
+    setCheck('pipeline', 'ng', e.message);
+    logErr('内蔵テスト: ' + e.message);
+  }
+  running = false;
+});
+
+$('fileInput').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file || running) return; running = true;
+  try {
+    setCheck('file', 'run', '実行中…');
+    if (state.api.status === '未実行') await runStaticChecks();
+    await transcode(file, file.name, 'file');
+  } catch (err) {
+    setCheck('file', 'ng', err.message);
+    logErr('実ファイル: ' + err.message);
+  }
+  running = false;
+  e.target.value = '';
+});
+
+$('copyBtn').addEventListener('click', async () => {
+  const lines = [
+    '# ひかりを編む 検証結果',
+    new Date().toLocaleString('ja-JP'),
+    $('device').textContent,
+    ...CHECKS.map(([id]) => `- ${state[id].label}: ${state[id].status}${state[id].detail ? '（' + state[id].detail + '）' : ''}`),
+  ];
+  const text = lines.join('\n');
+  try { await navigator.clipboard.writeText(text); progress('結果をコピーしました。チャットに貼り付けてください'); }
+  catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); ta.remove();
+    progress('結果をコピーしました（旧方式）');
+  }
+});
+</script>
+</body>
+</html>
