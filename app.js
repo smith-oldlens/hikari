@@ -19,13 +19,16 @@ function whenQueueBelow(getSize, target, max) {
     iv = setInterval(h, 15);
   });
 }
-function seekTo(video, t) {
+// fast=true はスクラブ用（近いキーフレームへ飛ぶので速い）。書き出し前の位置合わせは正確なシークを使う
+function seekTo(video, t, fast) {
   return new Promise(res => {
     if (Math.abs(video.currentTime - t) < 0.02) return res();
-    const h = () => { video.removeEventListener('seeked', h); res(); };
+    let done = false;
+    const h = () => { if (done) return; done = true; video.removeEventListener('seeked', h); res(); };
     video.addEventListener('seeked', h);
-    video.currentTime = t;
-    setTimeout(res, 2500);
+    if (fast && video.fastSeek) { try { video.fastSeek(t); } catch (e) { video.currentTime = t; } }
+    else video.currentTime = t;
+    setTimeout(h, 2500);
   });
 }
 
@@ -561,7 +564,7 @@ async function addFiles(files, kind) {
 // ===== タイムライン =====
 let pxPerSec = 46;
 let timelinePos = 0;        // 現在の再生位置（秒）
-let seekPending = null, seekBusy = false;
+let seekPending = null, seekBusy = false, seekSeq = 0;
 
 function timelineDur() { return project.clips.reduce((s, c) => s + clipLen(c), 0); }
 function sumBefore(i) { return project.clips.slice(0, i).reduce((s, c) => s + clipLen(c), 0); }
@@ -621,7 +624,14 @@ function renderMusicTrack(total, half, w) {
   } else {
     el.innerHTML = `<div class="musicBar empty" style="left:${half}px;width:${width}px">♪ 音楽を追加（いまは${project.muteAll ? '無音' : '元の音のまま'}）</div>`;
   }
-  el.querySelector('.musicBar').onclick = () => switchTab('music', true);
+  // スクラブのために横へ動かしたときは、音楽タブを開かない
+  const bar = el.querySelector('.musicBar');
+  let downX = null;
+  bar.addEventListener('pointerdown', ev => { downX = ev.clientX; });
+  bar.onclick = ev => {
+    if (downX != null && Math.abs(ev.clientX - downX) > 8) return;
+    switchTab('music', true);
+  };
 }
 
 // ドラッグ中は要素を作り直さず位置だけ更新する（ポインタ捕捉を失わないため）
@@ -670,18 +680,19 @@ function seekTimeline(t, fromScroll) {
   else requestSeek(c, c.start + at.local);
 }
 
-// 連続スクラブ時にシークが詰まらないよう1件ずつ処理する
+// 連続スクラブ時にシークが詰まらないよう1件ずつ処理する。
+// 追い越された古い要求は描画しない（前のクリップの絵が後から出るのを防ぐ）
 function requestSeek(clip, time) {
-  seekPending = { clip, time };
+  seekPending = { clip, time, seq: ++seekSeq };
   if (seekBusy) return;
   seekBusy = true;
   (async () => {
     while (seekPending) {
-      const { clip: c, time: tt } = seekPending;
+      const job = seekPending;
       seekPending = null;
-      lastDrawn = c;
-      await seekTo(c.video, clamp(tt, 0, Math.max(0, c.dur - 0.03)));
-      drawStill(c);
+      await seekTo(job.clip.video, clamp(job.time, 0, Math.max(0, job.clip.dur - 0.03)), true);
+      if (job.seq !== seekSeq) continue;
+      drawStill(job.clip);
     }
     seekBusy = false;
   })();
@@ -726,20 +737,29 @@ $('timelineTrack').addEventListener('pointerdown', e => {
     stopPlayback();
     return;
   }
-  // タップ＝選択、長押し＝並び替え
+  // タップ＝選択、その場で長押し＝並び替え。
+  // ここではポインタを捕捉しない（捕捉するとタイムラインの横スクロール＝スクラブを邪魔するため）。
+  // 少しでも動いたら並び替えには入らない（ドラッグは常にスクラブとして扱う）
   drag = {
-    mode: 'tap', clip, idx, block, x0: e.clientX,
-    left0: parseFloat(block.style.left),
+    mode: 'tap', clip, idx, block, x0: e.clientX, y0: e.clientY, pointerId: e.pointerId,
+    left0: parseFloat(block.style.left), moved: false,
     timer: setTimeout(() => {
-      if (drag && drag.mode === 'tap') { drag.mode = 'move'; block.classList.add('dragging'); }
-    }, 320),
+      if (!drag || drag.mode !== 'tap' || drag.moved) return;
+      drag.mode = 'move';
+      block.classList.add('dragging');
+      try { block.setPointerCapture(drag.pointerId); } catch (err) { }
+      stopPlayback();
+    }, 500),
   };
-  block.setPointerCapture(e.pointerId);
 });
 $('timelineTrack').addEventListener('pointermove', e => {
   if (!drag) return;
   const dx = e.clientX - drag.x0;
-  if (drag.mode === 'tap' && Math.abs(dx) > 8) { clearTimeout(drag.timer); drag = null; return; }
+  if (drag.mode === 'tap') {
+    if (Math.abs(dx) > 4 || Math.abs(e.clientY - drag.y0) > 12) drag.moved = true;
+    // 横に動かしたらスクラブに譲る（並び替えには入らない）
+    if (Math.abs(dx) > 8) { clearTimeout(drag.timer); drag = null; return; }
+  }
   if (drag.mode === 'trimL') {
     const c = drag.clip;
     c.start = clamp(drag.start0 + dx / pxPerSec, 0, c.end - 0.3);
@@ -789,15 +809,28 @@ function endDrag(e) {
     }
     selId = d.clip.id;
     renderTimeline(); renderClipEdit();
-    seekTimeline(sumBefore(project.clips.indexOf(d.clip)));
+    // 並び替え後も再生位置は動かさない（別のクリップへ飛ばない）
+    seekTimeline(timelinePos);
     return;
   }
-  // トリム終了
+  // トリム終了。編集した側の端に再生位置を残す
   renderTimeline(); renderClipEdit();
-  seekTimeline(sumBefore(project.clips.indexOf(d.clip)));
+  const i = project.clips.indexOf(d.clip);
+  seekTimeline(sumBefore(i) + (d.mode === 'trimR' ? Math.max(0, clipLen(d.clip) - 0.05) : 0));
+}
+// スクロール（スクラブ）が始まるとブラウザは pointercancel を送る。
+// これをタップとして扱うと勝手に選択・ジャンプしてしまうので、タップ／並び替えは中止する
+function cancelDrag(e) {
+  if (!drag) return;
+  if (drag.mode === 'trimL' || drag.mode === 'trimR') return endDrag(e);
+  clearTimeout(drag.timer);
+  drag.block?.classList.remove('dragging');
+  const wasMove = drag.mode === 'move';
+  drag = null;
+  if (wasMove) renderTimeline();
 }
 $('timelineTrack').addEventListener('pointerup', endDrag);
-$('timelineTrack').addEventListener('pointercancel', endDrag);
+$('timelineTrack').addEventListener('pointercancel', cancelDrag);
 
 // 2本指ピンチで時間スケールを拡大・縮小（全体表示⇔細かい調整）
 const tlPts = new Map();
@@ -1441,6 +1474,16 @@ $('clipTemp').oninput = () => {
   $('clipTemp').parentElement.querySelector('output').textContent = $('clipTemp').value;
   redraw();
 };
+function moveClip(d) {
+  const i = project.clips.findIndex(c => c.id === selId);
+  if (i < 0 || i + d < 0 || i + d >= project.clips.length) return;
+  const [c] = project.clips.splice(i, 1);
+  project.clips.splice(i + d, 0, c);
+  renderTimeline(); renderClipEdit();
+  seekTimeline(timelinePos);
+}
+$('moveL').onclick = () => moveClip(-1);
+$('moveR').onclick = () => moveClip(1);
 $('muteClipBtn').onclick = () => {
   const c = selClip(); if (!c || c.kind !== 'video') return;
   c.muted = !c.muted;
