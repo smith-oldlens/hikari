@@ -1,5 +1,5 @@
-// ひかりを編む v1 — 編集エンジン
-// プレビューも書き出しも同じWebGLシェーダを通す（色一致の要）
+// ひかりを編む — 編集エンジン
+// プレビューも書き出しも同じ多段描画（グレード→ブルーム→仕上げ）を通す（色一致の要）
 import { Muxer, ArrayBufferTarget } from 'https://esm.sh/mp4-muxer@5';
 
 const $ = id => document.getElementById(id);
@@ -23,9 +23,11 @@ function whenQueueBelow(getSize, target, max) {
 const project = {
   aspect: '16:9',
   fit: 'contain',      // 'contain'=切れないように収める / 'cover'=画面いっぱい（切り抜き）
-  clips: [],           // {id, file, url, video, name, dur, w, h, start, end, thumb}
-  lut: 'hikari',       // 'hikari' | 'none' | 'file' | 'mine'
-  lutFileData: null,   // {data:Uint8Array, n}
+  clips: [],           // {id, file, url, video, name, dur, w, h, start, end, thumb, bright, temp}
+  lut: 'hikari',       // 'mine' | 'airu' | 'hikari' | 'none' | 'file'
+  mineLutData: null,
+  airuLutData: null,
+  lutFileData: null,
   adjust: { exposure: 0, contrast: 0, saturation: 0, fade: 0, grain: 0.12, letterbox: true, strength: 0.85, effect: 0 },
   music: null,         // {name, arrayBuffer?|audioBuffer?, volume}
 };
@@ -38,7 +40,14 @@ const ASPECTS = {
   '4:5':  { css: '4/5',  prev: [540, 675], out1080: [1080, 1350], out2160: [2160, 2700] },
 };
 
-// ===== WebGL パイプライン =====
+// 質感モード（アイルMVの実測に基づく。主役はブルーム＝ハイライトの滲み）
+const FX = {
+  0: { bloom: 0,    thresh: 1.0,  weave: 0,      flicker: 0,     vignette: 0,    dust: 0, grainScale: 1,   cadence: 0 },
+  1: { bloom: 0.55, thresh: 0.60, weave: 0.0012, flicker: 0.007, vignette: 0.05, dust: 0, grainScale: 1,   cadence: 0 },   // アイル
+  2: { bloom: 0.25, thresh: 0.72, weave: 0.0035, flicker: 0.035, vignette: 0.30, dust: 1, grainScale: 2.5, cadence: 12 }, // 8mm強め
+};
+
+// ===== LUT =====
 const LUT_HIKARI_N = 17;
 function makeHikariLut() {
   const n = LUT_HIKARI_N, d = new Uint8Array(n * n * n * 3);
@@ -65,146 +74,6 @@ function makeIdentityLut() {
   return { data: d, n };
 }
 
-class GLPipe {
-  constructor(canvas) {
-    this.cv = canvas;
-    const gl = this.gl = canvas.getContext('webgl2');
-    if (!gl) throw new Error('WebGL2が使えない端末です');
-    const vs = `#version 300 es
-out vec2 uv;
-void main(){ vec2 p = vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2));
-uv = p; gl_Position = vec4(p.x*2.-1., 1.-p.y*2., 0., 1.); }`;
-    const fs = `#version 300 es
-precision mediump float; precision mediump sampler3D;
-uniform sampler2D uFrame; uniform sampler3D uLut;
-uniform float uStrength, uExposure, uContrast, uSaturation, uFade, uGrain, uLetterbox, uTime, uLutN, uEffect;
-uniform int uRot; uniform vec2 uVis;
-in vec2 uv; out vec4 o;
-void main(){
-  if (uv.y < uLetterbox || uv.y > 1.0 - uLetterbox) { o = vec4(0.,0.,0.,1.); return; }
-  vec2 e = 0.5 + (uv - 0.5) * uVis;
-  if (uEffect > 0.5) {
-    e += vec2(sin(uTime*0.37)*0.0025 + sin(uTime*0.11)*0.0015, cos(uTime*0.23)*0.002);
-  }
-  vec2 s = uRot==0 ? e : uRot==90 ? vec2(e.y, 1.0-e.x) : uRot==180 ? 1.0-e : vec2(1.0-e.y, e.x);
-  if (s.x < 0. || s.x > 1. || s.y < 0. || s.y > 1.) { o = vec4(0.,0.,0.,1.); return; }
-  vec3 c = texture(uFrame, s).rgb;
-  c *= exp2(uExposure);
-  c = (c - 0.5) * (1.0 + uContrast) + 0.5;
-  float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  c = mix(vec3(lum), c, 1.0 + uSaturation);
-  c = mix(c, c * 0.82 + 0.13, uFade);
-  vec3 g = texture(uLut, clamp(c,0.,1.) * ((uLutN-1.0)/uLutN) + (0.5/uLutN)).rgb;
-  c = mix(c, g, uStrength);
-  if (uEffect > 0.5) {
-    float r2 = distance(uv, vec2(0.5));
-    c *= 1.0 - 0.35 * smoothstep(0.45, 0.85, r2);
-    c *= 1.0 + 0.05 * sin(uTime*0.9) + 0.03 * sin(uTime*2.3);
-    float gn = fract(sin(dot(floor(gl_FragCoord.xy/2.5) + uTime, vec2(12.9898,78.233))) * 43758.5453);
-    c += (gn - 0.5) * 0.09;
-    float dust = fract(sin(dot(floor(vec2(e.x*24., e.y*14.)) + floor(uTime/3.), vec2(41.3,289.1))) * 33758.5);
-    if (dust > 0.996) c += 0.25;
-  }
-  float nz = fract(sin(dot(gl_FragCoord.xy + uTime, vec2(12.9898,78.233))) * 43758.5453);
-  c += (nz - 0.5) * uGrain;
-  o = vec4(clamp(c, 0., 1.), 1.0);
-}`;
-    const mk = (t, src) => {
-      const s = gl.createShader(t); gl.shaderSource(s, src); gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('シェーダ: ' + gl.getShaderInfoLog(s));
-      return s;
-    };
-    const p = this.prog = gl.createProgram();
-    gl.attachShader(p, mk(gl.VERTEX_SHADER, vs));
-    gl.attachShader(p, mk(gl.FRAGMENT_SHADER, fs));
-    gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('リンク: ' + gl.getProgramInfoLog(p));
-    gl.useProgram(p);
-    this.u = {};
-    for (const n of ['uStrength','uExposure','uContrast','uSaturation','uFade','uGrain','uLetterbox','uTime','uLutN','uRot','uVis','uEffect'])
-      this.u[n] = gl.getUniformLocation(p, n);
-    gl.uniform1i(gl.getUniformLocation(p, 'uFrame'), 0);
-    gl.uniform1i(gl.getUniformLocation(p, 'uLut'), 1);
-
-    this.frameTex = gl.createTexture();
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
-    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]])
-      gl.texParameteri(gl.TEXTURE_2D, k, v);
-    this.lutTex = gl.createTexture();
-    this.uploadMode = 'direct';
-    this.setLut(makeHikariLut());
-  }
-  setLut({ data, n }) {
-    const gl = this.gl;
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_3D, this.lutTex);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB8, n, n, n, 0, gl.RGB, gl.UNSIGNED_BYTE, data);
-    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE]])
-      gl.texParameteri(gl.TEXTURE_3D, k, v);
-    gl.uniform1f(this.u.uLutN, n);
-    gl.activeTexture(gl.TEXTURE0);
-  }
-  async draw(source, srcW, srcH, rot, time) {
-    const gl = this.gl, a = project.adjust;
-    const ow = this.cv.width, oh = this.cv.height;
-    const rw = rot % 180 === 0 ? srcW : srcH, rh = rot % 180 === 0 ? srcH : srcW;
-    const arOut = ow / oh, arSrc = rw / rh;
-    const vis = project.fit === 'cover'
-      ? (arSrc > arOut ? [arOut / arSrc, 1] : [1, arSrc / arOut])   // 画面いっぱい（はみ出しを切る）
-      : (arSrc > arOut ? [1, arSrc / arOut] : [arOut / arSrc, 1]);  // 切れないように収める（余白は黒）
-    gl.uniform2f(this.u.uVis, vis[0], vis[1]);
-    gl.uniform1f(this.u.uEffect, a.effect);
-    gl.uniform1i(this.u.uRot, rot);
-    gl.uniform1f(this.u.uStrength, project.lut === 'none' ? 0 : a.strength);
-    gl.uniform1f(this.u.uExposure, a.exposure);
-    gl.uniform1f(this.u.uContrast, a.contrast);
-    gl.uniform1f(this.u.uSaturation, a.saturation);
-    gl.uniform1f(this.u.uFade, a.fade);
-    gl.uniform1f(this.u.uGrain, a.grain);
-    gl.uniform1f(this.u.uLetterbox, a.letterbox ? 0.11 : 0);
-    gl.uniform1f(this.u.uTime, time % 1000);
-    gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
-    if (this.uploadMode === 'direct') {
-      try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); }
-      catch (e) { this.uploadMode = 'bitmap'; }
-    }
-    if (this.uploadMode === 'bitmap') {
-      const bmp = await createImageBitmap(source);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
-      bmp.close();
-    }
-    gl.viewport(0, 0, ow, oh);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-  }
-}
-
-const preview = new GLPipe($('previewCanvas'));
-
-function applyLutSelection(pipe) {
-  if (project.lut === 'mine' && project.mineLutData) pipe.setLut(project.mineLutData);
-  else if (project.lut === 'file' && project.lutFileData) pipe.setLut(project.lutFileData);
-  else if (project.lut === 'none') pipe.setLut(makeIdentityLut());
-  else pipe.setLut(makeHikariLut());
-}
-
-// 「自分の色」LUT（LightroomプリセットのLUT化）をアプリと同じ場所から読み込み、既定にする
-(async () => {
-  try {
-    const r = await fetch('./jibun-no-iro.cube');
-    if (!r.ok) return;
-    project.mineLutData = parseCube(await r.text());
-    const chip = document.querySelector('#lutChips .chip[data-lut=mine]');
-    chip.style.display = '';
-    project.lut = 'mine';
-    document.querySelectorAll('#lutChips .chip').forEach(c => c.classList.toggle('on', c === chip));
-    applyLutSelection(preview);
-    redraw();
-  } catch (e) { }
-})();
-
-// ===== .cube 読み込み =====
 function parseCube(text) {
   let n = 0; const vals = [];
   for (const line of text.split(/\r?\n/)) {
@@ -220,6 +89,266 @@ function parseCube(text) {
   for (let i = 0; i < vals.length; i++) d[i] = Math.max(0, Math.min(255, Math.round(vals[i] * 255)));
   return { data: d, n };
 }
+
+// ===== WebGL 多段パイプライン =====
+const VS = `#version 300 es
+out vec2 uv;
+void main(){ vec2 p = vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2));
+uv = p; gl_Position = vec4(p.x*2.-1., 1.-p.y*2., 0., 1.); }`;
+
+const NOISE = `
+float h1(float n){ return fract(sin(n)*43758.5453); }
+float vn(float t){ float i=floor(t), f=fract(t); return mix(h1(i), h1(i+1.), f*f*(3.-2.*f)); }`;
+
+const FS_GRADE = `#version 300 es
+precision mediump float; precision mediump sampler3D;
+uniform sampler2D uFrame; uniform sampler3D uLut;
+uniform float uStrength,uExposure,uContrast,uSaturation,uFade,uTemp,uLutN,uTime,uWeave;
+uniform int uRot; uniform vec2 uVis;
+in vec2 uv; out vec4 o;
+${NOISE}
+void main(){
+  vec2 e = 0.5 + (uv - 0.5) * uVis;
+  e += vec2((vn(uTime*0.045)-0.5)*2.*uWeave, (vn(uTime*0.045+37.7)-0.5)*1.6*uWeave);
+  vec2 s = uRot==0 ? e : uRot==90 ? vec2(e.y, 1.0-e.x) : uRot==180 ? 1.0-e : vec2(1.0-e.y, e.x);
+  if (s.x < 0. || s.x > 1. || s.y < 0. || s.y > 1.) { o = vec4(0.,0.,0.,1.); return; }
+  vec3 c = texture(uFrame, s).rgb;
+  c *= exp2(uExposure);
+  c.r *= 1.0 + uTemp*0.14;
+  c.b *= 1.0 - uTemp*0.14;
+  c = (c - 0.5) * (1.0 + uContrast) + 0.5;
+  float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  c = mix(vec3(lum), c, 1.0 + uSaturation);
+  c = mix(c, c * 0.82 + 0.13, uFade);
+  vec3 g = texture(uLut, clamp(c,0.,1.) * ((uLutN-1.0)/uLutN) + (0.5/uLutN)).rgb;
+  c = mix(c, g, uStrength);
+  o = vec4(clamp(c, 0., 1.), 1.0);
+}`;
+
+const FS_BLUR = `#version 300 es
+precision mediump float;
+uniform sampler2D uTex; uniform vec2 uDir; uniform float uThresh; uniform int uFirst;
+in vec2 uv; out vec4 o;
+void main(){
+  float w[5]; w[0]=0.227; w[1]=0.194; w[2]=0.121; w[3]=0.054; w[4]=0.016;
+  vec3 acc = vec3(0.);
+  for (int i = -4; i <= 4; i++) {
+    vec3 v = texture(uTex, uv + uDir * float(i)).rgb;
+    if (uFirst == 1) v = max(v - uThresh, 0.) / max(1. - uThresh, 0.001);
+    acc += v * w[i < 0 ? -i : i];
+  }
+  o = vec4(acc, 1.0);
+}`;
+
+const FS_FINAL = `#version 300 es
+precision mediump float;
+uniform sampler2D uBase, uBloom;
+uniform float uBloomAmt,uLetterbox,uVignette,uFlicker,uDust,uGrain,uGrainScale,uTime;
+in vec2 uv; out vec4 o;
+${NOISE}
+void main(){
+  if (uv.y < uLetterbox || uv.y > 1.0 - uLetterbox) { o = vec4(0.,0.,0.,1.); return; }
+  vec2 suv = vec2(uv.x, 1.0 - uv.y);
+  vec3 c = texture(uBase, suv).rgb;
+  vec3 bl = texture(uBloom, suv).rgb;
+  c = 1.0 - (1.0 - c) * (1.0 - bl * uBloomAmt);
+  c *= 1.0 - uVignette * smoothstep(0.45, 0.92, distance(uv, vec2(0.5)));
+  c *= 1.0 + (vn(uTime*0.6+51.0)-0.5)*2.0*uFlicker;
+  if (uDust > 0.5) {
+    float d = fract(sin(dot(floor(uv*vec2(26.,15.)) + floor(uTime*0.35), vec2(41.3,289.1)))*33758.5);
+    if (d > 0.997) c += 0.22;
+  }
+  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  float n = fract(sin(dot(floor(gl_FragCoord.xy/uGrainScale) + vec2(uTime, uTime*1.7), vec2(12.9898,78.233))) * 43758.5453);
+  c += (n - 0.5) * uGrain * (0.35 + 0.65*(1.0 - abs(2.0*l - 1.0)));
+  o = vec4(clamp(c, 0., 1.), 1.0);
+}`;
+
+class GLPipe {
+  constructor(canvas) {
+    this.cv = canvas;
+    const gl = this.gl = canvas.getContext('webgl2');
+    if (!gl) throw new Error('WebGL2が使えない端末です');
+    const mk = (t, src) => {
+      const s = gl.createShader(t); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('シェーダ: ' + gl.getShaderInfoLog(s));
+      return s;
+    };
+    const prog = (fs, names) => {
+      const p = gl.createProgram();
+      gl.attachShader(p, mk(gl.VERTEX_SHADER, VS));
+      gl.attachShader(p, mk(gl.FRAGMENT_SHADER, fs));
+      gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('リンク: ' + gl.getProgramInfoLog(p));
+      const u = {};
+      for (const n of names) u[n] = gl.getUniformLocation(p, n);
+      return { prog: p, u };
+    };
+    this.grade = prog(FS_GRADE, ['uFrame','uLut','uStrength','uExposure','uContrast','uSaturation','uFade','uTemp','uLutN','uTime','uWeave','uRot','uVis']);
+    this.blur = prog(FS_BLUR, ['uTex','uDir','uThresh','uFirst']);
+    this.final = prog(FS_FINAL, ['uBase','uBloom','uBloomAmt','uLetterbox','uVignette','uFlicker','uDust','uGrain','uGrainScale','uTime']);
+    gl.useProgram(this.grade.prog);
+    gl.uniform1i(this.grade.u.uFrame, 0);
+    gl.uniform1i(this.grade.u.uLut, 1);
+    gl.useProgram(this.blur.prog);
+    gl.uniform1i(this.blur.u.uTex, 2);
+    gl.useProgram(this.final.prog);
+    gl.uniform1i(this.final.u.uBase, 2);
+    gl.uniform1i(this.final.u.uBloom, 3);
+
+    const tex2 = () => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]])
+        gl.texParameteri(gl.TEXTURE_2D, k, v);
+      return t;
+    };
+    gl.activeTexture(gl.TEXTURE0);
+    this.frameTex = tex2();
+    this.texA = tex2(); this.texB = tex2(); this.texC = tex2();
+    this.fboA = gl.createFramebuffer(); this.fboB = gl.createFramebuffer(); this.fboC = gl.createFramebuffer();
+    this.lutTex = gl.createTexture();
+    this.uploadMode = 'direct';
+    this.w = 0; this.h = 0;
+    this.setLut(makeHikariLut());
+  }
+  _alloc(w, h) {
+    const gl = this.gl;
+    this.w = w; this.h = h;
+    this.bw = Math.max(2, w >> 3); this.bh = Math.max(2, h >> 3);
+    const bind = (tex, fbo, tw, th) => {
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, tw, th, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    };
+    gl.activeTexture(gl.TEXTURE7);
+    bind(this.texA, this.fboA, w, h);
+    bind(this.texB, this.fboB, this.bw, this.bh);
+    bind(this.texC, this.fboC, this.bw, this.bh);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+  setLut({ data, n }) {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_3D, this.lutTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB8, n, n, n, 0, gl.RGB, gl.UNSIGNED_BYTE, data);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE]])
+      gl.texParameteri(gl.TEXTURE_3D, k, v);
+    gl.useProgram(this.grade.prog);
+    gl.uniform1f(this.grade.u.uLutN, n);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+  async draw(source, srcW, srcH, rot, time, clip) {
+    const gl = this.gl, a = project.adjust, fx = FX[a.effect];
+    const ow = this.cv.width, oh = this.cv.height;
+    if (ow !== this.w || oh !== this.h) this._alloc(ow, oh);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
+    if (this.uploadMode === 'direct') {
+      try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); }
+      catch (e) { this.uploadMode = 'bitmap'; }
+    }
+    if (this.uploadMode === 'bitmap') {
+      const bmp = await createImageBitmap(source);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+      bmp.close();
+    }
+
+    // パス1: グレード（露出・色温度・LUT・微揺れ）→ fboA
+    const rw = rot % 180 === 0 ? srcW : srcH, rh = rot % 180 === 0 ? srcH : srcW;
+    const arOut = ow / oh, arSrc = rw / rh;
+    const vis = project.fit === 'cover'
+      ? (arSrc > arOut ? [arOut / arSrc, 1] : [1, arSrc / arOut])
+      : (arSrc > arOut ? [1, arSrc / arOut] : [arOut / arSrc, 1]);
+    gl.useProgram(this.grade.prog);
+    const u = this.grade.u;
+    gl.uniform2f(u.uVis, vis[0], vis[1]);
+    gl.uniform1i(u.uRot, rot);
+    gl.uniform1f(u.uStrength, project.lut === 'none' ? 0 : a.strength);
+    gl.uniform1f(u.uExposure, a.exposure + (clip?.bright || 0));
+    gl.uniform1f(u.uTemp, clip?.temp || 0);
+    gl.uniform1f(u.uContrast, a.contrast);
+    gl.uniform1f(u.uSaturation, a.saturation);
+    gl.uniform1f(u.uFade, a.fade);
+    gl.uniform1f(u.uTime, time % 100000);
+    gl.uniform1f(u.uWeave, fx.weave);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboA);
+    gl.viewport(0, 0, ow, oh);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // パス2・3: ブルーム（明部を抽出して縦横ぼかし）
+    if (fx.bloom > 0) {
+      gl.useProgram(this.blur.prog);
+      const b = this.blur.u;
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, this.texA);
+      gl.uniform1i(b.uFirst, 1);
+      gl.uniform1f(b.uThresh, fx.thresh);
+      gl.uniform2f(b.uDir, 1 / this.bw, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboB);
+      gl.viewport(0, 0, this.bw, this.bh);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindTexture(gl.TEXTURE_2D, this.texB);
+      gl.uniform1i(b.uFirst, 0);
+      gl.uniform2f(b.uDir, 0, 1 / this.bh);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboC);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    // 仕上げ: ブルーム合成・周辺減光・明滅・ダスト・粒子・レターボックス → 画面
+    gl.useProgram(this.final.prog);
+    const f = this.final.u;
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.texA);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, fx.bloom > 0 ? this.texC : this.texA);
+    gl.uniform1f(f.uBloomAmt, fx.bloom);
+    gl.uniform1f(f.uLetterbox, a.letterbox ? 0.11 : 0);
+    gl.uniform1f(f.uVignette, fx.vignette);
+    gl.uniform1f(f.uFlicker, fx.flicker);
+    gl.uniform1f(f.uDust, fx.dust);
+    gl.uniform1f(f.uGrain, a.grain);
+    gl.uniform1f(f.uGrainScale, fx.grainScale);
+    gl.uniform1f(f.uTime, time % 100000);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, ow, oh);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+}
+
+const preview = new GLPipe($('previewCanvas'));
+
+function applyLutSelection(pipe) {
+  if (project.lut === 'mine' && project.mineLutData) pipe.setLut(project.mineLutData);
+  else if (project.lut === 'airu' && project.airuLutData) pipe.setLut(project.airuLutData);
+  else if (project.lut === 'file' && project.lutFileData) pipe.setLut(project.lutFileData);
+  else if (project.lut === 'none') pipe.setLut(makeIdentityLut());
+  else pipe.setLut(makeHikariLut());
+}
+
+// 内蔵LUT（自分の色・アイル）をアプリと同じ場所から読み込む
+async function loadBuiltinLut(url, key, lutName, makeDefault) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return;
+    project[key] = parseCube(await r.text());
+    const chip = document.querySelector(`#lutChips .chip[data-lut=${lutName}]`);
+    chip.style.display = '';
+    if (makeDefault) {
+      project.lut = lutName;
+      document.querySelectorAll('#lutChips .chip').forEach(c => c.classList.toggle('on', c === chip));
+      applyLutSelection(preview);
+      redraw();
+    }
+  } catch (e) { }
+}
+loadBuiltinLut('./jibun-no-iro.cube', 'mineLutData', 'mine', true);
+loadBuiltinLut('./airu.cube', 'airuLutData', 'airu', false);
 
 // ===== クリップ取り込み =====
 async function addFiles(files) {
@@ -239,14 +368,13 @@ async function addFiles(files) {
         id: 'c' + (++clipSeq), file, url, video, name: file.name,
         dur, w: video.videoWidth, h: video.videoHeight,
         start: 0, end: preset > 0 ? Math.min(preset, dur) : dur, thumb: '',
+        bright: 0, temp: 0,
       };
       project.clips.push(clip);
       video.addEventListener('seeked', () => { if (!playing && lastSrc?.clip === clip) drawStill(clip); });
-      // クリップの進行はrAFではなくvideoイベントで駆動する（非表示タブ・画面オフでrAFが止まるため）
       const advance = () => { if (playing && project.clips[playIdx]?.video === video) { checkAdvance(); updateTimeLabel(); } };
       video.addEventListener('timeupdate', advance);
       video.addEventListener('ended', advance);
-      // OSや省電力による不意の一時停止から復帰する（再生中のみ）
       video.addEventListener('pause', () => {
         if (playing && project.clips[playIdx]?.video === video && !video.ended && video.currentTime < clip.end - 0.05)
           setTimeout(() => { if (playing && project.clips[playIdx]?.video === video) video.play().catch(() => { }); }, 250);
@@ -311,6 +439,10 @@ function renderClipEdit() {
   ts.value = c.start; te.value = c.end;
   $('trimStartOut').textContent = c.start.toFixed(1);
   $('trimEndOut').textContent = c.end.toFixed(1);
+  $('clipBright').value = Math.round(c.bright * 100);
+  $('clipBright').parentElement.querySelector('output').textContent = Math.round(c.bright * 100);
+  $('clipTemp').value = Math.round(c.temp * 100);
+  $('clipTemp').parentElement.querySelector('output').textContent = Math.round(c.temp * 100);
 }
 
 function showFrame(clip) {
@@ -318,14 +450,14 @@ function showFrame(clip) {
   lastSrc = { clip };
   const v = clip.video;
   const t = Math.min(Math.max(v.currentTime, clip.start), Math.max(clip.start, clip.end - 0.05));
-  if (Math.abs(v.currentTime - t) > 0.05) v.currentTime = t;  // seekedイベントで描画される
+  if (Math.abs(v.currentTime - t) > 0.05) v.currentTime = t;
   else drawStill(clip);
 }
 
 let lastSrc = null;
 function drawStill(clip) {
   if (clip.video.readyState >= 2)
-    preview.draw(clip.video, clip.video.videoWidth, clip.video.videoHeight, 0, performance.now() * 0.03);
+    preview.draw(clip.video, clip.video.videoWidth, clip.video.videoHeight, 0, performance.now() * 0.03, clip);
 }
 function redraw() {
   if (playing) return;
@@ -333,7 +465,7 @@ function redraw() {
 }
 
 // ===== 再生 =====
-let playing = false, playIdx = 0, rafId = 0;
+let playing = false, playIdx = 0, rafId = 0, lastPrevDraw = 0;
 let audioCtx = null, musicSrc = null, musicGain = null, musicAudioBuf = null;
 
 function timelineDur() { return project.clips.reduce((s, c) => s + (c.end - c.start), 0); }
@@ -392,7 +524,6 @@ function checkAdvance() {
       const n = project.clips[playIdx];
       n.video.currentTime = n.start;
       n.video.play().catch(() => {
-        // 背景タブ等でAbortされた場合に備えたリトライ
         const retry = () => { if (playing) n.video.play().catch(e => logErr('遷移play: ' + e.name)); };
         document.addEventListener('visibilitychange', retry, { once: true });
         setTimeout(retry, 400);
@@ -404,8 +535,13 @@ function loop() {
   if (!playing) return;
   const c = project.clips[playIdx];
   if (c) {
-    const v = c.video;
-    preview.draw(v, v.videoWidth, v.videoHeight, 0, performance.now() * 0.03);
+    const now = performance.now();
+    // 8mm強めはコマ落とし（12fps）をプレビューでも再現
+    if (FX[project.adjust.effect].cadence === 0 || now - lastPrevDraw > 1000 / FX[project.adjust.effect].cadence) {
+      const v = c.video;
+      preview.draw(v, v.videoWidth, v.videoHeight, 0, now * 0.03, c);
+      lastPrevDraw = now;
+    }
     updateTimeLabel();
     checkAdvance();
   }
@@ -510,7 +646,8 @@ async function exportVideo() {
     const pipe = new GLPipe(exCanvas);
     applyLutSelection(pipe);
 
-    let offsetUs = 0, lastKeyUs = -1e9, frameCount = 0;
+    const cadUs = FX[project.adjust.effect].cadence ? 1e6 / FX[project.adjust.effect].cadence : 0;
+    let offsetUs = 0, lastKeyUs = -1e9, frameCount = 0, lastCadIdx = -1;
     for (let ci = 0; ci < project.clips.length; ci++) {
       const clip = project.clips[ci];
       prog(`${ci + 1}/${project.clips.length}本目を解析中…`, sumBefore(ci) / total);
@@ -527,9 +664,14 @@ async function exportVideo() {
           chain = chain.then(async () => {
             const rel = frame.timestamp - Math.round(baseCts * 1e6 / samples[0].timescale);
             if (rel < startUs - 1 || rel >= endUs) { frame.close(); return; }
-            await pipe.draw(frame, frame.displayWidth || frame.codedWidth, frame.displayHeight || frame.codedHeight, rot, frameCount);
             const outTs = Math.round(offsetUs + (rel - startUs));
-            const out = new VideoFrame(exCanvas, { timestamp: outTs, duration: frame.duration ?? undefined });
+            if (cadUs) {
+              const idx = Math.floor(outTs / cadUs);
+              if (idx === lastCadIdx) { frame.close(); return; }
+              lastCadIdx = idx;
+            }
+            await pipe.draw(frame, frame.displayWidth || frame.codedWidth, frame.displayHeight || frame.codedHeight, rot, frameCount, clip);
+            const out = new VideoFrame(exCanvas, { timestamp: outTs, duration: cadUs ? Math.round(cadUs) : (frame.duration ?? undefined) });
             frame.close();
             await whenQueueBelow(() => encoder.encodeQueueSize, encoder, 4);
             const key = outTs - lastKeyUs >= 2e6;
@@ -633,6 +775,7 @@ $('aspectSel').onchange = () => {
   redraw();
 };
 $('previewBox').style.aspectRatio = ASPECTS['16:9'].css;
+$('fitSel').onchange = () => { project.fit = $('fitSel').value; redraw(); };
 
 const sliderMap = {
   uStrength: v => project.adjust.strength = v / 100,
@@ -651,19 +794,12 @@ for (const [id, fn] of Object.entries(sliderMap)) {
   };
 }
 $('uLetterbox').onchange = () => { project.adjust.letterbox = $('uLetterbox').checked; redraw(); };
-$('fitSel').onchange = () => { project.fit = $('fitSel').value; redraw(); };
-document.querySelectorAll('#fxChips .chip').forEach(chip => {
-  chip.onclick = () => {
-    project.adjust.effect = parseInt(chip.dataset.fx);
-    document.querySelectorAll('#fxChips .chip').forEach(c => c.classList.toggle('on', c === chip));
-    redraw();
-  };
-});
 
 document.querySelectorAll('#lutChips .chip').forEach(chip => {
   chip.onclick = () => {
     if (chip.dataset.lut === 'file' && !project.lutFileData) { $('lutFileInput').click(); return; }
     if (chip.dataset.lut === 'mine' && !project.mineLutData) return;
+    if (chip.dataset.lut === 'airu' && !project.airuLutData) return;
     project.lut = chip.dataset.lut;
     document.querySelectorAll('#lutChips .chip').forEach(c => c.classList.toggle('on', c === chip));
     applyLutSelection(preview);
@@ -684,6 +820,14 @@ $('lutFileInput').onchange = async e => {
   } catch (err) { alert(err.message); }
   e.target.value = '';
 };
+
+document.querySelectorAll('#fxChips .chip').forEach(chip => {
+  chip.onclick = () => {
+    project.adjust.effect = parseInt(chip.dataset.fx);
+    document.querySelectorAll('#fxChips .chip').forEach(c => c.classList.toggle('on', c === chip));
+    redraw();
+  };
+});
 
 $('musicBtn').onclick = () => $('musicFileInput').click();
 $('musicFileInput').onchange = async e => {
@@ -735,6 +879,18 @@ $('trimEnd').oninput = () => {
   c.video.currentTime = Math.max(c.start, c.end - 0.05);
   renderStripDurations();
 };
+$('clipBright').oninput = () => {
+  const c = selClip(); if (!c) return;
+  c.bright = parseFloat($('clipBright').value) / 100;
+  $('clipBright').parentElement.querySelector('output').textContent = $('clipBright').value;
+  redraw();
+};
+$('clipTemp').oninput = () => {
+  const c = selClip(); if (!c) return;
+  c.temp = parseFloat($('clipTemp').value) / 100;
+  $('clipTemp').parentElement.querySelector('output').textContent = $('clipTemp').value;
+  redraw();
+};
 function renderStripDurations() {
   document.querySelectorAll('.clipCard').forEach((d, i) => {
     const c = project.clips[i];
@@ -752,8 +908,6 @@ if (new URLSearchParams(location.search).has('dev')) {
     const cv = document.createElement('canvas');
     cv.width = w; cv.height = h;
     const x = cv.getContext('2d');
-    // 無音の音声トラックも付ける（実際のカメラ動画と同条件にするため。
-    // 音声トラックの無い動画はChromeが背景タブで省電力停止する）
     const muxer = new Muxer({ target: new ArrayBufferTarget(), video: { codec: 'avc', width: w, height: h }, audio: { codec: 'aac', sampleRate: 44100, numberOfChannels: 2 }, fastStart: 'in-memory', firstTimestampBehavior: 'offset' });
     const enc = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: e => logErr(e.message) });
     enc.configure({ codec: 'avc1.640028', width: w, height: h, bitrate: 6e6, framerate: fps });
@@ -776,8 +930,10 @@ if (new URLSearchParams(location.search).has('dev')) {
       const f = new VideoFrame(cv, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) });
       await whenQueueBelow(() => enc.encodeQueueSize, enc, 4);
       enc.encode(f, { keyFrame: i % 24 === 0 }); f.close();
+      if (i % 12 === 0) $('exportProg').textContent = `サンプル動画を生成中… ${i}/${totalF}`;
     }
     await enc.flush(); enc.close(); muxer.finalize();
+    $('exportProg').textContent = '';
     const file = new File([new Blob([muxer.target.buffer], { type: 'video/mp4' })], `サンプル${hue}.mp4`, { type: 'video/mp4' });
     addFiles([file]);
   };
