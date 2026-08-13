@@ -41,7 +41,7 @@ const project = {
   mineLutData: null,
   airuLutData: null,
   lutFileData: null,
-  adjust: { exposure: 0, contrast: 0, saturation: 0, fade: 0, grain: 0.12 / 4, grainSize: 1, letterbox: true, strength: 0.85, effect: 0 },
+  adjust: { exposure: 0, contrast: 0, saturation: 0, fade: 0, grain: 0.12 / 4, grainSize: 1, glow: 1, halation: 0, letterbox: true, strength: 0.85, effect: 0 },
   music: null,         // {name, arrayBuffer?|audioBuffer?, volume}
   muteAll: false,      // 元の音を消して音楽だけにする
   autoAlign: true,     // 自動そろえ
@@ -57,12 +57,15 @@ const ASPECTS = {
   '4:5':  { css: '4/5',  prev: [540, 675], out1080: [1080, 1350], out2160: [2160, 2700] },
 };
 
-// 質感モード（アイルMVの実測に基づく。主役はブルーム＝ハイライトの滲み）
+// 質感モード。数値は実測から決めている:
+//  ・アイルMV（全編解析）… 主役はブルーム＝ハイライトの滲み
+//  ・実物の8mmホームムービー（archive.org・16fps）… 揺れ 画面幅の0.023%、明滅 0.10%、
+//    粒子の空間相関 0.64(1px隣)、ハレーション 明部周囲でR-B +8.7/255
 // gAmt/gSize はチップ選択時にスライダーへ流し込む既定値（オート）。その後は手動調整可
 const FX = {
-  0: { bloom: 0,    thresh: 1.0,  weave: 0,      flicker: 0,     vignette: 0,    dust: 0, cadence: 0,  gAmt: 12, gSize: 100 },
-  1: { bloom: 0.55, thresh: 0.60, weave: 0.0012, flicker: 0.007, vignette: 0.05, dust: 0, cadence: 0,  gAmt: 14, gSize: 120 },  // アイル
-  2: { bloom: 0.25, thresh: 0.72, weave: 0.0035, flicker: 0.035, vignette: 0.30, dust: 1, cadence: 12, gAmt: 24, gSize: 250 }, // 8mm強め
+  0: { bloom: 0,    thresh: 1.0,  wide: 0,    weave: 0,      flicker: 0,     vignette: 0,    dust: 0, scratch: 0,    cadence: 0,  gAmt: 12, gSize: 100, gGlow: 100, gHal: 0 },
+  1: { bloom: 0.42, thresh: 0.58, wide: 0.38, weave: 0.0005, flicker: 0.003, vignette: 0.05, dust: 0, scratch: 0,    cadence: 0,  gAmt: 15, gSize: 105, gGlow: 100, gHal: 10 }, // アイル
+  2: { bloom: 0.28, thresh: 0.62, wide: 0.45, weave: 0.0009, flicker: 0.006, vignette: 0.22, dust: 1, scratch: 0.55, cadence: 16, gAmt: 32, gSize: 150, gGlow: 100, gHal: 26 }, // 8mm
 };
 
 // プリセット（2軸）: 日記＝毎日をさっと / MV＝作品としてSNSへ
@@ -169,27 +172,73 @@ void main(){
 
 const FS_FINAL = `#version 300 es
 precision mediump float;
-uniform sampler2D uBase, uBloom;
-uniform float uBloomAmt,uLetterbox,uVignette,uFlicker,uDust,uGrain,uGrainScale,uTime;
+uniform sampler2D uBase, uBloom, uBloomWide, uGrainTex;
+uniform float uBloomAmt,uWideAmt,uHalation,uLetterbox,uVignette,uFlicker,uDust,uScratch,uGrain,uGrainScale,uTime;
+uniform vec2 uGrainOfs;
 in vec2 uv; out vec4 o;
 ${NOISE}
+// 実測した粒子の輝度依存: 真っ黒では出ず、輝度0.19付近で最大、中間で落ち、明部でわずかに戻る
+float grainWeight(float l){
+  float rise = smoothstep(0.0, 0.15, l);
+  float fall = mix(1.0, 0.63, smoothstep(0.19, 0.60, l));
+  return rise * (fall + 0.06 * smoothstep(0.62, 0.95, l));
+}
 void main(){
   if (uv.y < uLetterbox || uv.y > 1.0 - uLetterbox) { o = vec4(0.,0.,0.,1.); return; }
   vec2 suv = vec2(uv.x, 1.0 - uv.y);
   vec3 c = texture(uBase, suv).rgb;
   vec3 bl = texture(uBloom, suv).rgb;
-  c = 1.0 - (1.0 - c) * (1.0 - bl * uBloomAmt);
+  vec3 wide = texture(uBloomWide, suv).rgb;
+  // 滲み: 芯の狭いブルーム＋広くやわらかいブルームの二段
+  vec3 glow = bl * uBloomAmt + wide * uWideAmt;
+  c = 1.0 - (1.0 - c) * (1.0 - glow);
+  // ハレーション: 明部のまわりに赤橙がにじむ（フィルム特有。白い滲みとは別物）
+  c = 1.0 - (1.0 - c) * (1.0 - wide * vec3(1.0, 0.40, 0.14) * uHalation);
   c *= 1.0 - uVignette * smoothstep(0.45, 0.92, distance(uv, vec2(0.5)));
   c *= 1.0 + (vn(uTime*0.6+51.0)-0.5)*2.0*uFlicker;
+  // ゴミ: 粒子テクスチャから拾うので四角ではなく有機的な形になる
   if (uDust > 0.5) {
-    float d = fract(sin(dot(floor(uv*vec2(26.,15.)) + floor(uTime*0.35), vec2(41.3,289.1)))*33758.5);
-    if (d > 0.997) c += 0.22;
+    float d = texture(uGrainTex, uv*2.7 + vec2(h1(floor(uTime*0.5)*3.1), h1(floor(uTime*0.5)*7.7))).g;
+    c += smoothstep(0.93, 1.0, d) * 0.30;
+  }
+  // 縦の傷: たまに数コマだけ出る
+  if (uScratch > 0.0) {
+    float seed = floor(uTime/26.0);
+    float on = step(0.62, h1(seed*7.7));
+    float sx = h1(seed*3.1);
+    c += on * uScratch * smoothstep(0.0018, 0.0, abs(uv.x - sx)) * (0.05 + 0.07*h1(seed*11.3));
   }
   float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  float n = fract(sin(dot(floor(gl_FragCoord.xy/uGrainScale) + vec2(uTime, uTime*1.7), vec2(12.9898,78.233))) * 43758.5453);
-  c += (n - 0.5) * uGrain * mix(0.12, 1.0, pow(1.0 - l, 1.6));
+  // 粒子: 空間的につながったテクスチャを毎フレームずらして重ねる（毎ピクセル独立だとデジタルノイズに見える）
+  float n = texture(uGrainTex, gl_FragCoord.xy / (uGrainScale * 256.0) + uGrainOfs).r;
+  c += (n - 0.5) * uGrain * grainWeight(l);
   o = vec4(clamp(c, 0., 1.), 1.0);
 }`;
+
+// 空間相関のある粒子テクスチャを作る（白色ノイズ→[1,2,1]の平滑化。
+// 実測の自己相関0.64(1px隣)にほぼ一致する）
+function makeGrainTexture(size) {
+  const n = size * size, ch = 3;
+  const src = new Float32Array(n * ch), tmp = new Float32Array(n * ch), out = new Uint8Array(n * ch);
+  for (let i = 0; i < n * ch; i++) src[i] = Math.random();
+  const at = (a, x, y, c) => a[(((y + size) % size) * size + ((x + size) % size)) * ch + c];
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) for (let c = 0; c < ch; c++)
+    tmp[(y * size + x) * ch + c] = (at(src, x - 1, y, c) + 2 * at(src, x, y, c) + at(src, x + 1, y, c)) / 4;
+  const vals = new Float32Array(n * ch);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) for (let c = 0; c < ch; c++)
+    vals[(y * size + x) * ch + c] = (at(tmp, x, y - 1, c) + 2 * at(tmp, x, y, c) + at(tmp, x, y + 1, c)) / 4;
+  for (let c = 0; c < ch; c++) {
+    let m = 0;
+    for (let i = 0; i < n; i++) m += vals[i * ch + c];
+    m /= n;
+    let sd = 0;
+    for (let i = 0; i < n; i++) sd += (vals[i * ch + c] - m) ** 2;
+    sd = Math.sqrt(sd / n) || 1;
+    for (let i = 0; i < n; i++)
+      out[i * ch + c] = Math.max(0, Math.min(255, Math.round(128 + (vals[i * ch + c] - m) / sd * 42)));
+  }
+  return { data: out, size };
+}
 
 // クリップに効く補正（手動＋自動そろえ）
 function clipBrightOf(c) { return c ? (c.bright || 0) + (project.autoAlign ? (c.autoBright || 0) : 0) : 0; }
@@ -217,7 +266,7 @@ class GLPipe {
     };
     this.grade = prog(FS_GRADE, ['uFrame','uLut','uStrength','uExposure','uContrast','uSaturation','uFade','uTemp','uLutN','uTime','uWeave','uRot','uVis']);
     this.blur = prog(FS_BLUR, ['uTex','uDir','uThresh','uFirst']);
-    this.final = prog(FS_FINAL, ['uBase','uBloom','uBloomAmt','uLetterbox','uVignette','uFlicker','uDust','uGrain','uGrainScale','uTime']);
+    this.final = prog(FS_FINAL, ['uBase','uBloom','uBloomWide','uGrainTex','uBloomAmt','uWideAmt','uHalation','uLetterbox','uVignette','uFlicker','uDust','uScratch','uGrain','uGrainScale','uTime','uGrainOfs']);
     gl.useProgram(this.grade.prog);
     gl.uniform1i(this.grade.u.uFrame, 0);
     gl.uniform1i(this.grade.u.uLut, 1);
@@ -226,6 +275,8 @@ class GLPipe {
     gl.useProgram(this.final.prog);
     gl.uniform1i(this.final.u.uBase, 2);
     gl.uniform1i(this.final.u.uBloom, 3);
+    gl.uniform1i(this.final.u.uBloomWide, 5);
+    gl.uniform1i(this.final.u.uGrainTex, 4);
 
     const tex2 = () => {
       const t = gl.createTexture();
@@ -236,9 +287,22 @@ class GLPipe {
     };
     gl.activeTexture(gl.TEXTURE0);
     this.frameTex = tex2();
-    this.texA = tex2(); this.texB = tex2(); this.texC = tex2();
-    this.fboA = gl.createFramebuffer(); this.fboB = gl.createFramebuffer(); this.fboC = gl.createFramebuffer();
+    this.texA = tex2(); this.texB = tex2(); this.texC = tex2(); this.texD = tex2();
+    this.fboA = gl.createFramebuffer(); this.fboB = gl.createFramebuffer();
+    this.fboC = gl.createFramebuffer(); this.fboD = gl.createFramebuffer();
     this.lutTex = gl.createTexture();
+
+    // 粒子テクスチャ（タイル状に繰り返して使う）
+    const grain = GRAIN ||= makeGrainTexture(256);
+    gl.activeTexture(gl.TEXTURE4);
+    this.grainTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.grainTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, grain.size, grain.size, 0, gl.RGB, gl.UNSIGNED_BYTE, grain.data);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.REPEAT], [gl.TEXTURE_WRAP_T, gl.REPEAT]])
+      gl.texParameteri(gl.TEXTURE_2D, k, v);
+
+    gl.activeTexture(gl.TEXTURE0);
     this.uploadMode = 'direct';
     this.w = 0; this.h = 0;
     this.setLut(makeHikariLut());
@@ -257,6 +321,7 @@ class GLPipe {
     bind(this.texA, this.fboA, w, h);
     bind(this.texB, this.fboB, this.bw, this.bh);
     bind(this.texC, this.fboC, this.bw, this.bh);
+    bind(this.texD, this.fboD, this.bw, this.bh);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.activeTexture(gl.TEXTURE0);
   }
@@ -311,8 +376,9 @@ class GLPipe {
     gl.viewport(0, 0, ow, oh);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-    // パス2・3: ブルーム（明部を抽出して縦横ぼかし）
-    if (fx.bloom > 0) {
+    // パス2〜5: ブルーム。狭い滲み（texC）と、それをさらにぼかした広い滲み（texD）の二段
+    const useGlow = (fx.bloom > 0 || fx.wide > 0) && (a.glow > 0 || a.halation > 0);
+    if (useGlow) {
       gl.useProgram(this.blur.prog);
       const b = this.blur.u;
       gl.activeTexture(gl.TEXTURE2);
@@ -328,6 +394,15 @@ class GLPipe {
       gl.uniform2f(b.uDir, 0, 1 / this.bh);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboC);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+      // さらに3倍の間隔でぼかして、広くやわらかい滲み（ハレーションもここから作る）
+      gl.bindTexture(gl.TEXTURE_2D, this.texC);
+      gl.uniform2f(b.uDir, 3 / this.bw, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboB);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindTexture(gl.TEXTURE_2D, this.texB);
+      gl.uniform2f(b.uDir, 0, 3 / this.bh);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboD);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
 
     // 仕上げ: ブルーム合成・周辺減光・明滅・ダスト・粒子・レターボックス → 画面
@@ -336,14 +411,24 @@ class GLPipe {
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.texA);
     gl.activeTexture(gl.TEXTURE3);
-    gl.bindTexture(gl.TEXTURE_2D, fx.bloom > 0 ? this.texC : this.texA);
-    gl.uniform1f(f.uBloomAmt, fx.bloom);
+    gl.bindTexture(gl.TEXTURE_2D, useGlow ? this.texC : this.texA);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, useGlow ? this.texD : this.texA);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this.grainTex);
+    gl.uniform1f(f.uBloomAmt, fx.bloom * a.glow);
+    gl.uniform1f(f.uWideAmt, fx.wide * a.glow);
+    gl.uniform1f(f.uHalation, useGlow ? a.halation : 0);
     gl.uniform1f(f.uLetterbox, a.letterbox ? 0.11 : 0);
     gl.uniform1f(f.uVignette, fx.vignette);
     gl.uniform1f(f.uFlicker, fx.flicker);
     gl.uniform1f(f.uDust, fx.dust);
+    gl.uniform1f(f.uScratch, fx.scratch);
     gl.uniform1f(f.uGrain, a.grain);
-    gl.uniform1f(f.uGrainScale, Math.max(0.5, a.grainSize));
+    // 粒の大きさは出力解像度に合わせる（プレビューと書き出しで同じ見た目にするため）。
+    // ただし1テクセルが1画素を下回るとプレビューで粒が潰れて荒れるので下限を設ける
+    gl.uniform1f(f.uGrainScale, Math.max(0.5, a.grainSize) * Math.max(0.7, oh / 1080));
+    gl.uniform2f(f.uGrainOfs, (Math.sin(time * 12.9898) * 43758.5453) % 1, (Math.sin(time * 78.233) * 43758.5453) % 1);
     gl.uniform1f(f.uTime, time % 100000);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, ow, oh);
@@ -352,11 +437,13 @@ class GLPipe {
   }
 }
 
+let GRAIN = null;
 const preview = new GLPipe($('previewCanvas'));
 
 function applyLutSelection(pipe) {
   if (project.lut === 'mine' && project.mineLutData) pipe.setLut(project.mineLutData);
   else if (project.lut === 'airu' && project.airuLutData) pipe.setLut(project.airuLutData);
+  else if (project.lut === 'film8' && project.film8LutData) pipe.setLut(project.film8LutData);
   else if (project.lut === 'file' && project.lutFileData) pipe.setLut(project.lutFileData);
   else if (project.lut === 'none') pipe.setLut(makeIdentityLut());
   else pipe.setLut(makeHikariLut());
@@ -1130,10 +1217,12 @@ async function exportVideo() {
   try {
     const res = $('resSel').value;
     const [outW, outH] = ASPECTS[project.aspect]['out' + (res === '2160' ? '2160' : '1080')];
+    // 粒子は圧縮で真っ先に潰れるので、質感を使うときはビットレートを上げる
+    const grainy = project.adjust.effect > 0 && project.adjust.grain > 0.02;
     let encCfg = {
       codec: Math.max(outW, outH) > 2000 ? 'avc1.640033' : 'avc1.640028',
       width: outW, height: outH,
-      bitrate: Math.max(outW, outH) > 2000 ? 40e6 : 14e6,
+      bitrate: Math.round((Math.max(outW, outH) > 2000 ? 40e6 : 14e6) * (grainy ? 1.7 : 1)),
       framerate: 30,
     };
     if (!(await VideoEncoder.isConfigSupported(encCfg)).supported) throw new Error('この解像度のエンコードに未対応の端末です');
@@ -1359,6 +1448,8 @@ const sliderMap = {
   uFade: v => project.adjust.fade = v / 200,
   uGrain: v => project.adjust.grain = v / 400,
   uGrainSize: v => project.adjust.grainSize = v / 100,
+  uGlow: v => project.adjust.glow = v / 100,
+  uHal: v => project.adjust.halation = v / 100,
 };
 for (const [id, fn] of Object.entries(sliderMap)) {
   const el = $(id);
@@ -1381,6 +1472,7 @@ document.querySelectorAll('#lutChips .chip').forEach(chip => {
     if (chip.dataset.lut === 'file' && !project.lutFileData) { $('lutFileInput').click(); return; }
     if (chip.dataset.lut === 'mine' && !project.mineLutData) return;
     if (chip.dataset.lut === 'airu' && !project.airuLutData) return;
+    if (chip.dataset.lut === 'film8' && !project.film8LutData) return;
     project.lut = chip.dataset.lut;
     document.querySelectorAll('#lutChips .chip').forEach(c => c.classList.toggle('on', c === chip));
     applyLutSelection(preview);
@@ -1409,13 +1501,18 @@ document.querySelectorAll('#fxChips .chip').forEach(chip => {
   chip.onclick = () => {
     project.adjust.effect = parseInt(chip.dataset.fx);
     document.querySelectorAll('#fxChips .chip').forEach(c => c.classList.toggle('on', c === chip));
+    // 質感を選ぶと、粒子・滲み・ハレーションがそのモードの推奨値に自動設定される（あとから手動調整可）
     const fx = FX[project.adjust.effect];
-    $('uGrain').value = fx.gAmt;
-    project.adjust.grain = fx.gAmt / 400;
-    $('uGrain').parentElement.querySelector('output').textContent = fx.gAmt;
-    $('uGrainSize').value = fx.gSize;
-    project.adjust.grainSize = fx.gSize / 100;
-    $('uGrainSize').parentElement.querySelector('output').textContent = fx.gSize;
+    for (const [id, val, apply] of [
+      ['uGrain', fx.gAmt, v => project.adjust.grain = v / 400],
+      ['uGrainSize', fx.gSize, v => project.adjust.grainSize = v / 100],
+      ['uGlow', fx.gGlow, v => project.adjust.glow = v / 100],
+      ['uHal', fx.gHal, v => project.adjust.halation = v / 100],
+    ]) {
+      $(id).value = val;
+      apply(val);
+      $(id).parentElement.querySelector('output').textContent = val;
+    }
     redraw();
   };
 });
@@ -1624,6 +1721,50 @@ if (new URLSearchParams(location.search).has('dev')) {
       autoBright: +(c.autoBright || 0).toFixed(2), autoTemp: +(c.autoTemp || 0).toFixed(2),
     })),
   });
+  // 質感の効き具合を数値で確かめる（描画と同じタスク内でピクセルを読む）
+  window._probe = (fxMode, clipIdx, rowFrac) => {
+    const c = project.clips[clipIdx ?? project.clips.length - 1];
+    if (!c || !clipReady(c)) return null;
+    project.adjust.effect = fxMode;
+    preview.draw(clipSource(c), c.w, c.h, 0, 7, c);
+    const cv = preview.cv, gl = preview.gl;
+    const y = Math.round(cv.height * (rowFrac ?? 0.33));
+    const px = new Uint8Array(cv.width * 4);
+    gl.readPixels(0, y, cv.width, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const out = [];
+    for (let x = 0; x < cv.width; x += 8) {
+      const i = x * 4;
+      out.push([x, Math.round(0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]), px[i] - px[i + 2]]);
+    }
+    return out;
+  };
+  // 粒子の空間相関を圧縮のかからないプレビュー画面で測る
+  window._probeGrain = (fxMode, clipIdx) => {
+    const c = project.clips[clipIdx ?? project.clips.length - 1];
+    if (!c || !clipReady(c)) return null;
+    project.adjust.effect = fxMode;
+    preview.draw(clipSource(c), c.w, c.h, 0, 7, c);
+    const cv = preview.cv, gl = preview.gl;
+    const W = Math.min(360, cv.width - 20), H = Math.min(200, cv.height - 20);
+    const px = new Uint8Array(W * H * 4);
+    gl.readPixels(10, Math.round(cv.height * 0.5), W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const g = new Float64Array(W * H);
+    for (let i = 0; i < W * H; i++) g[i] = px[i * 4 + 1];
+    const hp = new Float64Array(W * H);
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      let s = 0;
+      for (let j = -1; j <= 1; j++) { const b = (y + j) * W + x; s += g[b - 1] + g[b] + g[b + 1]; }
+      hp[y * W + x] = g[y * W + x] - s / 9;
+    }
+    const ac = lag => {
+      let n = 0, d = 0;
+      for (let y = 2; y < H - 2; y++) for (let x = 2; x < W - 6; x++) { const a = hp[y * W + x]; n += a * hp[y * W + x + lag]; d += a * a; }
+      return d ? n / d : 0;
+    };
+    let sd = 0, cnt = 0;
+    for (let y = 2; y < H - 2; y++) for (let x = 2; x < W - 2; x++) { sd += hp[y * W + x] ** 2; cnt++; }
+    return { ac1: +ac(1).toFixed(3), ac2: +ac(2).toFixed(3), ac4: +ac(4).toFixed(3), std: +Math.sqrt(sd / cnt).toFixed(2) };
+  };
 }
 
 // ===== 起動 =====
@@ -1643,6 +1784,8 @@ function syncUIFromProject() {
   setS('uFade', ad.fade * 200);
   setS('uGrain', ad.grain * 400);
   setS('uGrainSize', ad.grainSize * 100);
+  setS('uGlow', (ad.glow ?? 1) * 100);
+  setS('uHal', (ad.halation ?? 0) * 100);
   $('uLetterbox').checked = ad.letterbox;
   document.querySelectorAll('#lutChips .chip').forEach(c => c.classList.toggle('on', c.dataset.lut === project.lut));
   if (project.lutFileName) document.querySelector('#lutChips .chip[data-lut=file]').textContent = project.lutFileName.replace(/\.cube$/i, '');
@@ -1661,6 +1804,7 @@ function syncUIFromProject() {
   await Promise.all([
     loadBuiltinLut('./jibun-no-iro.cube', 'mineLutData', 'mine'),
     loadBuiltinLut('./airu.cube', 'airuLutData', 'airu'),
+    loadBuiltinLut('./film8mm.cube', 'film8LutData', 'film8'),
   ]);
   if (st) {
     try {
@@ -1691,6 +1835,7 @@ function syncUIFromProject() {
   }
   if (project.lut === 'mine' && !project.mineLutData) project.lut = 'hikari';
   if (project.lut === 'airu' && !project.airuLutData) project.lut = 'hikari';
+  if (project.lut === 'film8' && !project.film8LutData) project.lut = 'hikari';
   if (project.lut === 'file' && !project.lutFileData) project.lut = 'hikari';
   if (!st && project.mineLutData) project.lut = 'mine';
   if (project.music) await ensureMusicBuffer().catch(() => { });
