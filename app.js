@@ -333,54 +333,122 @@ function applyLutSelection(pipe) {
 }
 
 // 内蔵LUT（自分の色・アイル）をアプリと同じ場所から読み込む
-async function loadBuiltinLut(url, key, lutName, makeDefault) {
+async function loadBuiltinLut(url, key, lutName) {
   try {
     const r = await fetch(url);
     if (!r.ok) return;
     project[key] = parseCube(await r.text());
-    const chip = document.querySelector(`#lutChips .chip[data-lut=${lutName}]`);
-    chip.style.display = '';
-    if (makeDefault) {
-      project.lut = lutName;
-      document.querySelectorAll('#lutChips .chip').forEach(c => c.classList.toggle('on', c === chip));
-      applyLutSelection(preview);
-      redraw();
-    }
+    document.querySelector(`#lutChips .chip[data-lut=${lutName}]`).style.display = '';
   } catch (e) { }
 }
-loadBuiltinLut('./jibun-no-iro.cube', 'mineLutData', 'mine', true);
-loadBuiltinLut('./airu.cube', 'airuLutData', 'airu', false);
+
+// ===== 保存と復元（IndexedDB。動画本体と編集状態を端末内に保持） =====
+let dbP = null, ready = false, saveTimer = 0;
+function db() {
+  dbP ||= new Promise((res, rej) => {
+    const r = indexedDB.open('hikari', 1);
+    r.onupgradeneeded = () => { r.result.createObjectStore('files'); r.result.createObjectStore('state'); };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  return dbP;
+}
+async function idbPut(store, key, val) {
+  const d = await db();
+  return new Promise((res, rej) => {
+    const t = d.transaction(store, 'readwrite');
+    t.objectStore(store).put(val, key);
+    t.oncomplete = res;
+    t.onerror = () => rej(t.error);
+  });
+}
+async function idbGet(store, key) {
+  const d = await db();
+  return new Promise((res, rej) => {
+    const q = d.transaction(store).objectStore(store).get(key);
+    q.onsuccess = () => res(q.result);
+    q.onerror = () => rej(q.error);
+  });
+}
+async function idbDel(store, key) {
+  const d = await db();
+  return new Promise((res, rej) => {
+    const t = d.transaction(store, 'readwrite');
+    t.objectStore(store).delete(key);
+    t.oncomplete = res;
+    t.onerror = () => rej(t.error);
+  });
+}
+async function idbClear(store) {
+  const d = await db();
+  return new Promise((res, rej) => {
+    const t = d.transaction(store, 'readwrite');
+    t.objectStore(store).clear();
+    t.oncomplete = res;
+    t.onerror = () => rej(t.error);
+  });
+}
+function scheduleSave() {
+  if (!ready) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveState, 400);
+}
+function saveState() {
+  const st = {
+    aspect: project.aspect, fit: project.fit, lut: project.lut,
+    adjust: { ...project.adjust },
+    lutFileText: project.lutFileText || null, lutFileName: project.lutFileName || null,
+    clips: project.clips.map(c => ({ id: c.id, name: c.name, start: c.start, end: c.end, bright: c.bright, temp: c.temp, thumb: c.thumb })),
+    music: project.music ? { name: project.music.name, volume: project.music.volume, stored: !project.music.audioBuffer } : null,
+    clipSeq,
+  };
+  idbPut('state', 'project', st).catch(() => { });
+}
 
 // ===== クリップ取り込み =====
+async function createClip(fileBlob, meta) {
+  const url = URL.createObjectURL(fileBlob);
+  const video = document.createElement('video');
+  video.src = url; video.muted = true; video.playsInline = true; video.preload = 'auto';
+  await new Promise((res, rej) => {
+    video.onloadedmetadata = res;
+    video.onerror = () => rej(new Error('この動画は読み込めませんでした: ' + (meta?.name || fileBlob.name || '')));
+    setTimeout(() => rej(new Error('読み込みタイムアウト: ' + (meta?.name || fileBlob.name || ''))), 15000);
+  });
+  const dur = video.duration;
+  let start = 0, end = dur;
+  if (meta) {
+    start = Math.min(meta.start ?? 0, Math.max(0, dur - 0.2));
+    end = Math.min(meta.end ?? dur, dur);
+  } else {
+    const preset = parseFloat($('presetSel').value);
+    end = preset > 0 ? Math.min(preset, dur) : dur;
+  }
+  const clip = {
+    id: meta?.id || 'c' + (++clipSeq), file: fileBlob, url, video,
+    name: meta?.name || fileBlob.name || 'クリップ',
+    dur, w: video.videoWidth, h: video.videoHeight,
+    start, end, thumb: meta?.thumb || '',
+    bright: meta?.bright || 0, temp: meta?.temp || 0,
+  };
+  video.addEventListener('seeked', () => { if (!playing && lastSrc?.clip === clip) drawStill(clip); });
+  const advance = () => { if (playing && project.clips[playIdx]?.video === video) { checkAdvance(); updateTimeLabel(); } };
+  video.addEventListener('timeupdate', advance);
+  video.addEventListener('ended', advance);
+  video.addEventListener('pause', () => {
+    if (playing && project.clips[playIdx]?.video === video && !video.ended && video.currentTime < clip.end - 0.05)
+      setTimeout(() => { if (playing && project.clips[playIdx]?.video === video) video.play().catch(() => { }); }, 250);
+  });
+  if (!clip.thumb) await makeThumb(clip);
+  return clip;
+}
+
 async function addFiles(files) {
   for (const file of files) {
     try {
-      const url = URL.createObjectURL(file);
-      const video = document.createElement('video');
-      video.src = url; video.muted = true; video.playsInline = true; video.preload = 'auto';
-      await new Promise((res, rej) => {
-        video.onloadedmetadata = res;
-        video.onerror = () => rej(new Error('この動画は読み込めませんでした: ' + file.name));
-        setTimeout(() => rej(new Error('読み込みタイムアウト: ' + file.name)), 15000);
-      });
-      const dur = video.duration;
-      const preset = parseFloat($('presetSel').value);
-      const clip = {
-        id: 'c' + (++clipSeq), file, url, video, name: file.name,
-        dur, w: video.videoWidth, h: video.videoHeight,
-        start: 0, end: preset > 0 ? Math.min(preset, dur) : dur, thumb: '',
-        bright: 0, temp: 0,
-      };
+      const clip = await createClip(file, null);
       project.clips.push(clip);
-      video.addEventListener('seeked', () => { if (!playing && lastSrc?.clip === clip) drawStill(clip); });
-      const advance = () => { if (playing && project.clips[playIdx]?.video === video) { checkAdvance(); updateTimeLabel(); } };
-      video.addEventListener('timeupdate', advance);
-      video.addEventListener('ended', advance);
-      video.addEventListener('pause', () => {
-        if (playing && project.clips[playIdx]?.video === video && !video.ended && video.currentTime < clip.end - 0.05)
-          setTimeout(() => { if (playing && project.clips[playIdx]?.video === video) video.play().catch(() => { }); }, 250);
-      });
-      await makeThumb(clip);
+      idbPut('files', clip.id, file).catch(e => logErr('動画の保存に失敗: ' + e.message));
       selId = clip.id;
       renderStrip(); renderClipEdit();
       showFrame(clip);
@@ -428,6 +496,7 @@ function renderStrip() {
     strip.insertBefore(d, add);
   });
   updateTimeLabel();
+  scheduleSave();
 }
 
 function renderClipEdit() {
@@ -461,6 +530,7 @@ function drawStill(clip) {
     preview.draw(clip.video, clip.video.videoWidth, clip.video.videoHeight, 0, performance.now() * 0.03, clip);
 }
 function redraw() {
+  scheduleSave();
   if (playing) return;
   if (lastSrc?.clip) drawStill(lastSrc.clip);
 }
@@ -812,7 +882,10 @@ $('lutFileInput').onchange = async e => {
   const f = e.target.files[0];
   if (!f) return;
   try {
-    project.lutFileData = parseCube(await f.text());
+    const text = await f.text();
+    project.lutFileData = parseCube(text);
+    project.lutFileText = text;
+    project.lutFileName = f.name;
     project.lut = 'file';
     const chip = document.querySelector('#lutChips .chip[data-lut=file]');
     chip.textContent = f.name.replace(/\.cube$/i, '');
@@ -843,14 +916,18 @@ $('musicBtn').onclick = () => $('musicFileInput').click();
 $('musicFileInput').onchange = async e => {
   const f = e.target.files[0];
   if (!f) return;
-  project.music = { name: f.name, arrayBuffer: await f.arrayBuffer(), volume: parseFloat($('musicVol').value) / 100 };
+  const ab = await f.arrayBuffer();
+  project.music = { name: f.name, arrayBuffer: ab, volume: parseFloat($('musicVol').value) / 100 };
   musicAudioBuf = null;
   $('musicName').textContent = f.name;
+  idbPut('files', 'music', new Blob([ab])).catch(() => { });
+  scheduleSave();
   e.target.value = '';
 };
 $('musicVol').oninput = () => {
   $('musicVol').parentElement.querySelector('output').textContent = $('musicVol').value;
   if (project.music) project.music.volume = parseFloat($('musicVol').value) / 100;
+  scheduleSave();
 };
 
 $('moveL').onclick = () => moveClip(-1);
@@ -866,6 +943,7 @@ $('delClip').onclick = () => {
   const i = project.clips.findIndex(c => c.id === selId);
   if (i < 0) return;
   URL.revokeObjectURL(project.clips[i].url);
+  idbDel('files', project.clips[i].id).catch(() => { });
   project.clips.splice(i, 1);
   selId = project.clips[Math.min(i, project.clips.length - 1)]?.id || null;
   renderStrip(); renderClipEdit();
@@ -907,6 +985,7 @@ function renderStripDurations() {
     if (c) d.querySelector('.d').textContent = (c.end - c.start).toFixed(1) + '秒';
   });
   updateTimeLabel();
+  scheduleSave();
 }
 
 // ===== 開発モード（?dev=1）=====
@@ -971,3 +1050,91 @@ if (new URLSearchParams(location.search).has('dev')) {
     catch (e) { return e.name + ': ' + e.message; }
   };
 }
+
+// ===== 起動時の復元 =====
+$('resetProject').onclick = async () => {
+  if (!confirm('いま並べている作品をすべて消して、新しく始めますか？')) return;
+  stopPlayback();
+  project.clips.forEach(c => URL.revokeObjectURL(c.url));
+  project.clips = [];
+  project.music = null;
+  musicAudioBuf = null;
+  selId = null;
+  $('musicName').textContent = '未選択';
+  await idbClear('files').catch(() => { });
+  await idbClear('state').catch(() => { });
+  renderStrip(); renderClipEdit();
+  $('emptyHint').style.display = 'flex';
+  const gl = preview.gl;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  updateTimeLabel();
+};
+
+function syncUIFromProject() {
+  $('aspectSel').value = project.aspect;
+  const a = ASPECTS[project.aspect];
+  $('previewBox').style.aspectRatio = a.css;
+  $('previewCanvas').width = a.prev[0];
+  $('previewCanvas').height = a.prev[1];
+  $('fitSel').value = project.fit;
+  const ad = project.adjust;
+  const setS = (id, v) => { const el = $(id); el.value = Math.round(v); el.parentElement.querySelector('output').textContent = Math.round(v); };
+  setS('uStrength', ad.strength * 100);
+  setS('uExposure', ad.exposure * 100);
+  setS('uContrast', ad.contrast * 200);
+  setS('uSaturation', ad.saturation * 100);
+  setS('uFade', ad.fade * 200);
+  setS('uGrain', ad.grain * 400);
+  setS('uGrainSize', ad.grainSize * 100);
+  $('uLetterbox').checked = ad.letterbox;
+  document.querySelectorAll('#lutChips .chip').forEach(c => c.classList.toggle('on', c.dataset.lut === project.lut));
+  if (project.lutFileName) document.querySelector('#lutChips .chip[data-lut=file]').textContent = project.lutFileName.replace(/\.cube$/i, '');
+  document.querySelectorAll('#fxChips .chip').forEach(c => c.classList.toggle('on', parseInt(c.dataset.fx) === ad.effect));
+  if (project.music) $('musicName').textContent = project.music.name;
+  applyLutSelection(preview);
+  renderStrip(); renderClipEdit();
+  $('emptyHint').style.display = project.clips.length ? 'none' : 'flex';
+  const c = selClip() || project.clips[0];
+  if (c) showFrame(c);
+}
+
+(async function init() {
+  try { navigator.storage?.persist?.(); } catch (e) { }
+  let st = null;
+  try { st = await idbGet('state', 'project'); } catch (e) { }
+  await Promise.all([
+    loadBuiltinLut('./jibun-no-iro.cube', 'mineLutData', 'mine'),
+    loadBuiltinLut('./airu.cube', 'airuLutData', 'airu'),
+  ]);
+  if (st) {
+    try {
+      project.aspect = st.aspect || '16:9';
+      project.fit = st.fit || 'contain';
+      Object.assign(project.adjust, st.adjust || {});
+      clipSeq = st.clipSeq || 0;
+      if (st.lutFileText) {
+        try { project.lutFileData = parseCube(st.lutFileText); project.lutFileText = st.lutFileText; project.lutFileName = st.lutFileName; } catch (e) { }
+      }
+      project.lut = st.lut || 'hikari';
+      for (const m of st.clips || []) {
+        const blob = await idbGet('files', m.id).catch(() => null);
+        if (!blob) continue;
+        try { project.clips.push(await createClip(blob, m)); }
+        catch (e) { logErr('復元できないクリップ: ' + m.name); }
+      }
+      if (st.music?.stored) {
+        const mb = await idbGet('files', 'music').catch(() => null);
+        if (mb) project.music = { name: st.music.name, arrayBuffer: await mb.arrayBuffer(), volume: st.music.volume };
+      }
+      selId = project.clips[0]?.id || null;
+    } catch (e) { logErr('復元エラー: ' + e.message); }
+  }
+  if (project.lut === 'mine' && !project.mineLutData) project.lut = 'hikari';
+  if (project.lut === 'airu' && !project.airuLutData) project.lut = 'hikari';
+  if (project.lut === 'file' && !project.lutFileData) project.lut = 'hikari';
+  if (!st && project.mineLutData) project.lut = 'mine';
+  syncUIFromProject();
+  ready = true;
+})();
