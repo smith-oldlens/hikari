@@ -568,8 +568,8 @@ function sumBefore(i) { return project.clips.slice(0, i).reduce((s, c) => s + cl
 function halfView() { return $('timelineScroll').clientWidth / 2; }
 
 function renderTimeline() {
-  const track = $('timelineTrack');
-  track.innerHTML = '';
+  const layer = $('clipLayer');
+  layer.innerHTML = '';
   const half = halfView();
   let t = 0;
   project.clips.forEach(c => {
@@ -583,18 +583,51 @@ function renderTimeline() {
     const mark = c.kind === 'photo' ? '🖼' : ((c.muted || project.muteAll) ? '🔇' : '');
     d.innerHTML = `<span class="mk">${mark}</span><span class="lbl">${len.toFixed(1)}s</span>`;
     if (c.id === selId) d.insertAdjacentHTML('beforeend', '<div class="trimHandle left"></div><div class="trimHandle right"></div>');
-    track.appendChild(d);
+    layer.appendChild(d);
     t += len;
   });
-  track.style.width = (half * 2 + t * pxPerSec) + 'px';
+  const w = half * 2 + t * pxPerSec;
+  $('timelineTrack').style.width = w + 'px';
+  layer.style.width = w + 'px';
+  renderRuler(t, half, w);
+  renderMusicTrack(t, half, w);
   updateTimeLabel();
   scheduleSave();
+}
+
+// 時間目盛（ピンチ倍率に応じて刻みを選ぶ）
+function renderRuler(total, half, w) {
+  const el = $('ruler');
+  el.style.width = w + 'px';
+  const steps = [0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
+  const step = steps.find(s => s * pxPerSec >= 46) || steps[steps.length - 1];
+  let html = '';
+  for (let t = 0; t <= total + 1e-6; t += step) {
+    const label = step < 1 ? `${t.toFixed(1)}s` : total >= 60 ? fmt(t) : `${Math.round(t)}s`;
+    html += `<span class="tick" style="left:${half + t * pxPerSec}px">${label}</span>`;
+  }
+  el.innerHTML = html;
+}
+
+// 音楽トラック（タップで音楽タブを開く）
+function renderMusicTrack(total, half, w) {
+  const el = $('musicLayer');
+  el.style.width = w + 'px';
+  const width = Math.max(60, total * pxPerSec);
+  if (project.music) {
+    const dur = musicAudioBuf ? musicAudioBuf.duration : total;
+    const shown = Math.max(60, Math.min(dur, total) * pxPerSec);
+    el.innerHTML = `<div class="musicBar" style="left:${half}px;width:${shown}px">♪ ${project.music.name}${project.muteAll ? '（元の音はオフ）' : ''}</div>`;
+  } else {
+    el.innerHTML = `<div class="musicBar empty" style="left:${half}px;width:${width}px">♪ 音楽を追加（いまは${project.muteAll ? '無音' : '元の音のまま'}）</div>`;
+  }
+  el.querySelector('.musicBar').onclick = () => switchTab('music', true);
 }
 
 // ドラッグ中は要素を作り直さず位置だけ更新する（ポインタ捕捉を失わないため）
 function layoutBlocks() {
   const half = halfView();
-  const els = [...$('timelineTrack').children];
+  const els = [...$('clipLayer').children];
   let t = 0;
   els.forEach((el, i) => {
     const c = project.clips[i];
@@ -606,7 +639,9 @@ function layoutBlocks() {
     if (lbl) lbl.textContent = len.toFixed(1) + 's';
     t += len;
   });
-  $('timelineTrack').style.width = (half * 2 + t * pxPerSec) + 'px';
+  const w = half * 2 + t * pxPerSec;
+  $('timelineTrack').style.width = w + 'px';
+  $('clipLayer').style.width = w + 'px';
   updateTimeLabel();
 }
 
@@ -734,7 +769,7 @@ function endDrag(e) {
     selId = d.clip.id;
     renderTimeline(); renderClipEdit();
     seekTimeline(sumBefore(project.clips.indexOf(d.clip)));
-    switchTab('clips');
+    switchTab('clips', true);
     return;
   }
   if (d.mode === 'move') {
@@ -764,11 +799,62 @@ function endDrag(e) {
 $('timelineTrack').addEventListener('pointerup', endDrag);
 $('timelineTrack').addEventListener('pointercancel', endDrag);
 
+// 2本指ピンチで時間スケールを拡大・縮小（全体表示⇔細かい調整）
+const tlPts = new Map();
+let pinch = null;
+function setZoom(px, anchorT) {
+  const next = clamp(px, 4, 260);
+  if (Math.abs(next - pxPerSec) < 0.01) return;
+  pxPerSec = next;
+  renderTimeline();
+  if (anchorT != null) timelinePos = anchorT;
+  syncPlayheadScroll();
+}
+function cancelDragForPinch() {
+  if (!drag) return;
+  clearTimeout(drag.timer);
+  drag.block?.classList.remove('dragging');
+  drag = null;
+  renderTimeline();
+}
+const tlScroll = $('timelineScroll');
+tlScroll.addEventListener('pointerdown', e => {
+  tlPts.set(e.pointerId, e.clientX);
+  if (tlPts.size === 2) {
+    cancelDragForPinch();
+    const xs = [...tlPts.values()];
+    pinch = { dist: Math.max(1, Math.abs(xs[0] - xs[1])), px0: pxPerSec, t0: timelinePos };
+  }
+}, true);
+tlScroll.addEventListener('pointermove', e => {
+  if (!tlPts.has(e.pointerId)) return;
+  tlPts.set(e.pointerId, e.clientX);
+  if (!pinch || tlPts.size < 2) return;
+  e.preventDefault();
+  const xs = [...tlPts.values()];
+  setZoom(pinch.px0 * (Math.max(1, Math.abs(xs[0] - xs[1])) / pinch.dist), pinch.t0);
+}, true);
+const endPinchPt = e => { tlPts.delete(e.pointerId); if (tlPts.size < 2) pinch = null; };
+tlScroll.addEventListener('pointerup', endPinchPt, true);
+tlScroll.addEventListener('pointercancel', endPinchPt, true);
+// Mac/トラックパッドのピンチは ctrl+wheel として届く
+tlScroll.addEventListener('wheel', e => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  setZoom(pxPerSec * Math.exp(-e.deltaY * 0.01), timelinePos);
+}, { passive: false });
+
 // ===== プレビュー描画 =====
 let lastDrawn = null;
 function drawStill(clip) {
-  if (!clipReady(clip)) return;
   lastDrawn = clip;
+  // まだ読み込み中なら、準備できてから描き直す（復元直後にプレビューが黒いままになるのを防ぐ）
+  if (!clipReady(clip)) {
+    const src = clipSource(clip);
+    const ev = clip.kind === 'photo' ? 'load' : 'loadeddata';
+    src.addEventListener(ev, () => { if (lastDrawn === clip && !playing) drawStill(clip); }, { once: true });
+    return;
+  }
   preview.draw(clipSource(clip), clip.w, clip.h, 0, performance.now() * 0.03, clip);
 }
 function redraw() {
@@ -1191,9 +1277,12 @@ function closePresetSheet() { $('presetSheet').classList.remove('on'); }
 $('presetSheet').addEventListener('click', e => { if (e.target.id === 'presetSheet') closePresetSheet(); });
 
 // ===== UI 配線 =====
-function switchTab(name) {
-  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
-  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('on', p.id === 'panel-' + name));
+// 同じタブをもう一度押すと閉じる（プレビューを広く使えるように）
+function switchTab(name, forceOpen) {
+  const cur = document.querySelector('.panel.on')?.id.replace('panel-', '');
+  const close = !forceOpen && cur === name;
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', !close && b.dataset.tab === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('on', !close && p.id === 'panel-' + name));
 }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 
@@ -1307,6 +1396,8 @@ $('musicFileInput').onchange = async e => {
   musicAudioBuf = null;
   $('musicName').textContent = f.name;
   idbPut('files', 'music', new Blob([ab])).catch(() => { });
+  await ensureMusicBuffer().catch(() => { });
+  renderTimeline();
   scheduleSave();
   e.target.value = '';
 };
@@ -1479,6 +1570,7 @@ if (new URLSearchParams(location.search).has('dev')) {
     project.music = { name: 'サンプル音楽', audioBuffer: buf, volume: 0.7 };
     musicAudioBuf = buf;
     $('musicName').textContent = 'サンプル音楽';
+    renderTimeline();
   };
   window._dbg = () => ({
     playing, playIdx, timelinePos: +timelinePos.toFixed(2), total: +timelineDur().toFixed(2),
@@ -1558,6 +1650,7 @@ function syncUIFromProject() {
   if (project.lut === 'airu' && !project.airuLutData) project.lut = 'hikari';
   if (project.lut === 'file' && !project.lutFileData) project.lut = 'hikari';
   if (!st && project.mineLutData) project.lut = 'mine';
+  if (project.music) await ensureMusicBuffer().catch(() => { });
   syncUIFromProject();
   if (project.clips.length) seekTimeline(0);
   if (!st || !project.clips.length) $('presetSheet').classList.add('on');
