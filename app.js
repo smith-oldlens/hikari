@@ -441,9 +441,11 @@ function clipSource(c) { return c.kind === 'photo' ? c.img : c.video; }
 function clipLen(c) { return c.end - c.start; }
 function clipReady(c) { return c.kind === 'photo' ? c.img.complete : c.video.readyState >= 2; }
 
-async function createClip(fileBlob, meta, analyze) {
+// meta は「復元・複製のための既存データ」専用。新規取り込みの種別は kindHint で渡す
+// （meta に種別ヒントを兼ねさせると復元扱いになり、取り込み長さや自動そろえが効かなくなる）
+async function createClip(fileBlob, meta, analyze, kindHint) {
   const url = URL.createObjectURL(fileBlob);
-  const kind = meta?.kind || (fileBlob.type.startsWith('image/') ? 'photo' : 'video');
+  const kind = meta?.kind || kindHint || (fileBlob.type.startsWith('image/') ? 'photo' : 'video');
   const name = meta?.name || fileBlob.name || (kind === 'photo' ? '写真' : 'クリップ');
   const clip = {
     id: meta?.id || 'c' + (++clipSeq), kind, file: fileBlob, url, name,
@@ -545,7 +547,7 @@ async function addFiles(files, kind) {
   const before = project.clips.length;
   for (const file of files) {
     try {
-      const clip = await createClip(file, kind ? { kind } : null, true);
+      const clip = await createClip(file, null, true, kind);
       project.clips.push(clip);
       idbPut('files', clip.id, file).catch(e => logErr('保存に失敗: ' + e.message));
       selId = clip.id;
@@ -1415,8 +1417,9 @@ $('resetProject').onclick = async () => {
 if (new URLSearchParams(location.search).has('dev')) {
   $('devbar').style.display = 'flex';
   $('devClip').onclick = async () => {
+    // 取り込み長さの検証ができるよう、サンプルは6秒（既定の3秒より長く）作る
     const hue = 180 + Math.random() * 120 | 0;
-    const w = 1280, h = 720, fps = 24, totalF = 60;
+    const w = 1280, h = 720, fps = 24, totalF = 144;
     const cv = document.createElement('canvas');
     cv.width = w; cv.height = h;
     const x = cv.getContext('2d');
