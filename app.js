@@ -28,7 +28,7 @@ const project = {
   mineLutData: null,
   airuLutData: null,
   lutFileData: null,
-  adjust: { exposure: 0, contrast: 0, saturation: 0, fade: 0, grain: 0.12, letterbox: true, strength: 0.85, effect: 0 },
+  adjust: { exposure: 0, contrast: 0, saturation: 0, fade: 0, grain: 0.12 / 4, grainSize: 1, letterbox: true, strength: 0.85, effect: 0 },
   music: null,         // {name, arrayBuffer?|audioBuffer?, volume}
 };
 let selId = null;
@@ -41,10 +41,11 @@ const ASPECTS = {
 };
 
 // 質感モード（アイルMVの実測に基づく。主役はブルーム＝ハイライトの滲み）
+// gAmt/gSize はチップ選択時にスライダーへ流し込む既定値（オート）。その後は手動調整可
 const FX = {
-  0: { bloom: 0,    thresh: 1.0,  weave: 0,      flicker: 0,     vignette: 0,    dust: 0, grainScale: 1,   cadence: 0 },
-  1: { bloom: 0.55, thresh: 0.60, weave: 0.0012, flicker: 0.007, vignette: 0.05, dust: 0, grainScale: 1,   cadence: 0 },   // アイル
-  2: { bloom: 0.25, thresh: 0.72, weave: 0.0035, flicker: 0.035, vignette: 0.30, dust: 1, grainScale: 2.5, cadence: 12 }, // 8mm強め
+  0: { bloom: 0,    thresh: 1.0,  weave: 0,      flicker: 0,     vignette: 0,    dust: 0, cadence: 0,  gAmt: 12, gSize: 100 },
+  1: { bloom: 0.55, thresh: 0.60, weave: 0.0012, flicker: 0.007, vignette: 0.05, dust: 0, cadence: 0,  gAmt: 14, gSize: 120 },  // アイル
+  2: { bloom: 0.25, thresh: 0.72, weave: 0.0035, flicker: 0.035, vignette: 0.30, dust: 1, cadence: 12, gAmt: 24, gSize: 250 }, // 8mm強め
 };
 
 // ===== LUT =====
@@ -160,7 +161,7 @@ void main(){
   }
   float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
   float n = fract(sin(dot(floor(gl_FragCoord.xy/uGrainScale) + vec2(uTime, uTime*1.7), vec2(12.9898,78.233))) * 43758.5453);
-  c += (n - 0.5) * uGrain * (0.35 + 0.65*(1.0 - abs(2.0*l - 1.0)));
+  c += (n - 0.5) * uGrain * mix(0.12, 1.0, pow(1.0 - l, 1.6));
   o = vec4(clamp(c, 0., 1.), 1.0);
 }`;
 
@@ -312,7 +313,7 @@ class GLPipe {
     gl.uniform1f(f.uFlicker, fx.flicker);
     gl.uniform1f(f.uDust, fx.dust);
     gl.uniform1f(f.uGrain, a.grain);
-    gl.uniform1f(f.uGrainScale, fx.grainScale);
+    gl.uniform1f(f.uGrainScale, Math.max(0.5, a.grainSize));
     gl.uniform1f(f.uTime, time % 100000);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, ow, oh);
@@ -784,6 +785,7 @@ const sliderMap = {
   uSaturation: v => project.adjust.saturation = v / 100,
   uFade: v => project.adjust.fade = v / 200,
   uGrain: v => project.adjust.grain = v / 400,
+  uGrainSize: v => project.adjust.grainSize = v / 100,
 };
 for (const [id, fn] of Object.entries(sliderMap)) {
   const el = $(id);
@@ -825,6 +827,14 @@ document.querySelectorAll('#fxChips .chip').forEach(chip => {
   chip.onclick = () => {
     project.adjust.effect = parseInt(chip.dataset.fx);
     document.querySelectorAll('#fxChips .chip').forEach(c => c.classList.toggle('on', c === chip));
+    // 粒子の量・大きさをモードの推奨値に自動設定（その後の手動調整は自由）
+    const fx = FX[project.adjust.effect];
+    $('uGrain').value = fx.gAmt;
+    project.adjust.grain = fx.gAmt / 400;
+    $('uGrain').parentElement.querySelector('output').textContent = fx.gAmt;
+    $('uGrainSize').value = fx.gSize;
+    project.adjust.grainSize = fx.gSize / 100;
+    $('uGrainSize').parentElement.querySelector('output').textContent = fx.gSize;
     redraw();
   };
 });
