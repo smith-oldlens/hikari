@@ -63,9 +63,11 @@ const ASPECTS = {
 //    粒子の空間相関 0.64(1px隣)、ハレーション 明部周囲でR-B +8.7/255
 // gAmt/gSize はチップ選択時にスライダーへ流し込む既定値（オート）。その後は手動調整可
 const FX = {
-  0: { bloom: 0,    thresh: 1.0,  wide: 0,    weave: 0,      flicker: 0,     vignette: 0,    dust: 0, scratch: 0,    cadence: 0,  gAmt: 12, gSize: 100, gGlow: 100, gHal: 0 },
-  1: { bloom: 0.42, thresh: 0.58, wide: 0.38, weave: 0.0005, flicker: 0.003, vignette: 0.05, dust: 0, scratch: 0,    cadence: 0,  gAmt: 15, gSize: 105, gGlow: 100, gHal: 10 }, // アイル
-  2: { bloom: 0.28, thresh: 0.62, wide: 0.45, weave: 0.0009, flicker: 0.006, vignette: 0.22, dust: 1, scratch: 0.55, cadence: 16, gAmt: 32, gSize: 150, gGlow: 100, gHal: 26 }, // 8mm
+  // curve: 粒子の輝度カーブ（0=中間調で最大＝アイル実測／1=シャドウで最大＝8mm実測）
+  // halo: ハレーションの色（8mmは赤橙、アイルは実測どおり青寄り）／soften: 粒子前の甘さ／hz: 粒子を更新するコマ速度
+  0: { bloom: 0,    thresh: 1.0,  wide: 0,    weave: 0,      flicker: 0,     vignette: 0,    dust: 0, scratch: 0,    cadence: 0,  curve: 0, soften: 0,    hz: 24, halo: [1.0, 0.40, 0.14], gAmt: 10, gSize: 100, gGlow: 100, gHal: 0 },
+  1: { bloom: 0.42, thresh: 0.58, wide: 0.38, weave: 0.0005, flicker: 0.003, vignette: 0.05, dust: 0, scratch: 0,    cadence: 0,  curve: 0, soften: 0.15, hz: 24, halo: [0.55, 0.75, 1.0], gAmt: 12, gSize: 90,  gGlow: 100, gHal: 8 },  // アイル
+  2: { bloom: 0.28, thresh: 0.62, wide: 0.45, weave: 0.0009, flicker: 0.006, vignette: 0.22, dust: 1, scratch: 0.55, cadence: 16, curve: 1, soften: 0.45, hz: 16, halo: [1.0, 0.40, 0.14], gAmt: 34, gSize: 150, gGlow: 100, gHal: 26 }, // 8mm
 };
 
 // プリセット（2軸）: 日記＝毎日をさっと / MV＝作品としてSNSへ
@@ -139,7 +141,8 @@ in vec2 uv; out vec4 o;
 ${NOISE}
 void main(){
   vec2 e = 0.5 + (uv - 0.5) * uVis;
-  e += vec2((vn(uTime*0.045)-0.5)*2.*uWeave, (vn(uTime*0.045+37.7)-0.5)*1.6*uWeave);
+  // 横はゆっくり漂い(weave)、縦は細かく跳ねる(jump)。実際のフィルムはこの2つで性質が違う
+  e += vec2((vn(uTime*1.4)-0.5)*2.0*uWeave, (vn(uTime*9.0+37.7)-0.5)*1.1*uWeave);
   vec2 s = uRot==0 ? e : uRot==90 ? vec2(e.y, 1.0-e.x) : uRot==180 ? 1.0-e : vec2(1.0-e.y, e.x);
   if (s.x < 0. || s.x > 1. || s.y < 0. || s.y > 1.) { o = vec4(0.,0.,0.,1.); return; }
   vec3 c = texture(uFrame, s).rgb;
@@ -173,45 +176,59 @@ void main(){
 const FS_FINAL = `#version 300 es
 precision mediump float;
 uniform sampler2D uBase, uBloom, uBloomWide, uGrainTex;
-uniform float uBloomAmt,uWideAmt,uHalation,uLetterbox,uVignette,uFlicker,uDust,uScratch,uGrain,uGrainScale,uTime;
-uniform vec2 uGrainOfs;
+uniform float uBloomAmt,uWideAmt,uHalation,uLetterbox,uVignette,uFlicker,uDust,uScratch,uGrain,uGrainScale,uTime,uGrainCurve,uSoften;
+uniform vec2 uGrainOfs, uTexel;
+uniform vec3 uHaloColor;
 in vec2 uv; out vec4 o;
 ${NOISE}
-// 実測した粒子の輝度依存: 真っ黒では出ず、輝度0.19付近で最大、中間で落ち、明部でわずかに戻る
-float grainWeight(float l){
-  float rise = smoothstep(0.0, 0.15, l);
-  float fall = mix(1.0, 0.63, smoothstep(0.19, 0.60, l));
-  return rise * (fall + 0.06 * smoothstep(0.62, 0.95, l));
+// 粒子の輝度依存は素材で違う（どちらも実測）:
+//  uCurve=0 … アイルMV型。中間調(0.56)で最大、シャドウとハイライトで減る
+//  uCurve=1 … 実物8mm型。輝度0.19付近で最大、真っ黒では出ない
+float grainWeight(float l, float uCurve){
+  float mid = 0.25 + 0.75 * exp(-((l - 0.55) * (l - 0.55)) / (2.0 * 0.20 * 0.20));
+  float sh = smoothstep(0.0, 0.15, l) * (mix(1.0, 0.63, smoothstep(0.19, 0.60, l)) + 0.06 * smoothstep(0.62, 0.95, l));
+  return mix(mid, sh, uCurve);
 }
 void main(){
   if (uv.y < uLetterbox || uv.y > 1.0 - uLetterbox) { o = vec4(0.,0.,0.,1.); return; }
   vec2 suv = vec2(uv.x, 1.0 - uv.y);
   vec3 c = texture(uBase, suv).rgb;
+  // 8mmの実効解像度は低いので、粒子を乗せる前に少しだけ甘くする（デジタルの硬さを取る）
+  if (uSoften > 0.0) {
+    vec3 s = texture(uBase, suv + vec2(uTexel.x, 0.0)).rgb + texture(uBase, suv - vec2(uTexel.x, 0.0)).rgb
+           + texture(uBase, suv + vec2(0.0, uTexel.y)).rgb + texture(uBase, suv - vec2(0.0, uTexel.y)).rgb;
+    c = mix(c, (c * 2.0 + s) / 6.0, uSoften);
+  }
   vec3 bl = texture(uBloom, suv).rgb;
   vec3 wide = texture(uBloomWide, suv).rgb;
   // 滲み: 芯の狭いブルーム＋広くやわらかいブルームの二段
   vec3 glow = bl * uBloomAmt + wide * uWideAmt;
   c = 1.0 - (1.0 - c) * (1.0 - glow);
-  // ハレーション: 明部のまわりに赤橙がにじむ（フィルム特有。白い滲みとは別物）
-  c = 1.0 - (1.0 - c) * (1.0 - wide * vec3(1.0, 0.40, 0.14) * uHalation);
+  // ハレーション: 明部のまわりに色がにじむ。8mmは赤橙（フィルム特有）、アイルは青寄り（実測）
+  c = 1.0 - (1.0 - c) * (1.0 - wide * uHaloColor * uHalation);
   c *= 1.0 - uVignette * smoothstep(0.45, 0.92, distance(uv, vec2(0.5)));
-  c *= 1.0 + (vn(uTime*0.6+51.0)-0.5)*2.0*uFlicker;
-  // ゴミ: 粒子テクスチャから拾うので四角ではなく有機的な形になる
+  c *= 1.0 + (vn(uTime*17.0+51.0)-0.5)*2.0*uFlicker;
+  // ゴミ: 1コマだけ出て次のコマで消える（フィルムのゴミの定義的な性質）。
+  // 粒子テクスチャから拾うので四角ではなく有機的な形になる
   if (uDust > 0.5) {
-    float d = texture(uGrainTex, uv*2.7 + vec2(h1(floor(uTime*0.5)*3.1), h1(floor(uTime*0.5)*7.7))).g;
-    c += smoothstep(0.93, 1.0, d) * 0.30;
+    float ds = floor(uTime*16.0);
+    float d = texture(uGrainTex, uv*2.7 + vec2(h1(ds*3.1), h1(ds*7.7))).g;
+    // 数秒スケールで濃い区間と何も出ない区間を作る（均等にばら撒くと嘘っぽくなる）
+    float density = smoothstep(0.45, 0.85, vn(uTime*0.35));
+    c += smoothstep(0.945, 1.0, d) * 0.30 * density;
   }
-  // 縦の傷: たまに数コマだけ出る
+  // 縦の傷: 数コマ持続し、たまにしか出ない（シーンの動きとは無関係に居座る）
   if (uScratch > 0.0) {
-    float seed = floor(uTime/26.0);
+    float seed = floor(uTime*1.2);
     float on = step(0.62, h1(seed*7.7));
     float sx = h1(seed*3.1);
     c += on * uScratch * smoothstep(0.0018, 0.0, abs(uv.x - sx)) * (0.05 + 0.07*h1(seed*11.3));
   }
   float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  // 粒子: 空間的につながったテクスチャを毎フレームずらして重ねる（毎ピクセル独立だとデジタルノイズに見える）
+  // 粒子: 空間的につながったテクスチャをコマごとにずらして重ねる。
+  // 加算ではなく乗算的に効かせる（フィルムと同じで、真っ黒には粒が乗らない）
   float n = texture(uGrainTex, gl_FragCoord.xy / (uGrainScale * 256.0) + uGrainOfs).r;
-  c += (n - 0.5) * uGrain * grainWeight(l);
+  c += c * (n - 0.5) * uGrain * 2.2 * grainWeight(l, uGrainCurve);
   o = vec4(clamp(c, 0., 1.), 1.0);
 }`;
 
@@ -266,7 +283,7 @@ class GLPipe {
     };
     this.grade = prog(FS_GRADE, ['uFrame','uLut','uStrength','uExposure','uContrast','uSaturation','uFade','uTemp','uLutN','uTime','uWeave','uRot','uVis']);
     this.blur = prog(FS_BLUR, ['uTex','uDir','uThresh','uFirst']);
-    this.final = prog(FS_FINAL, ['uBase','uBloom','uBloomWide','uGrainTex','uBloomAmt','uWideAmt','uHalation','uLetterbox','uVignette','uFlicker','uDust','uScratch','uGrain','uGrainScale','uTime','uGrainOfs']);
+    this.final = prog(FS_FINAL, ['uBase','uBloom','uBloomWide','uGrainTex','uBloomAmt','uWideAmt','uHalation','uLetterbox','uVignette','uFlicker','uDust','uScratch','uGrain','uGrainScale','uTime','uGrainOfs','uGrainCurve','uSoften','uTexel','uHaloColor']);
     gl.useProgram(this.grade.prog);
     gl.uniform1i(this.grade.u.uFrame, 0);
     gl.uniform1i(this.grade.u.uLut, 1);
@@ -428,7 +445,14 @@ class GLPipe {
     // 粒の大きさは出力解像度に合わせる（プレビューと書き出しで同じ見た目にするため）。
     // ただし1テクセルが1画素を下回るとプレビューで粒が潰れて荒れるので下限を設ける
     gl.uniform1f(f.uGrainScale, Math.max(0.5, a.grainSize) * Math.max(0.7, oh / 1080));
-    gl.uniform2f(f.uGrainOfs, (Math.sin(time * 12.9898) * 43758.5453) % 1, (Math.sin(time * 78.233) * 43758.5453) % 1);
+    gl.uniform1f(f.uGrainCurve, fx.curve);
+    gl.uniform1f(f.uSoften, fx.soften);
+    gl.uniform2f(f.uTexel, 1.4 / ow, 1.4 / oh);
+    gl.uniform3f(f.uHaloColor, fx.halo[0], fx.halo[1], fx.halo[2]);
+    // 粒子はフィルムに焼き付いているので、コマごとに1回だけ更新する
+    // （表示のたびに変えるとデジタルノイズの見え方になる）
+    const gseed = Math.floor(time * fx.hz);
+    gl.uniform2f(f.uGrainOfs, (Math.sin(gseed * 12.9898) * 43758.5453) % 1, (Math.sin(gseed * 78.233) * 43758.5453) % 1);
     gl.uniform1f(f.uTime, time % 100000);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, ow, oh);
@@ -966,6 +990,8 @@ tlScroll.addEventListener('wheel', e => {
 
 // ===== プレビュー描画 =====
 let lastDrawn = null;
+// uTime は「秒」で統一する（粒子をコマ単位で更新するため）
+const nowSec = () => performance.now() / 1000;
 function drawStill(clip) {
   lastDrawn = clip;
   // まだ読み込み中なら、準備できてから描き直す（復元直後にプレビューが黒いままになるのを防ぐ）
@@ -975,7 +1001,7 @@ function drawStill(clip) {
     src.addEventListener(ev, () => { if (lastDrawn === clip && !playing) drawStill(clip); }, { once: true });
     return;
   }
-  preview.draw(clipSource(clip), clip.w, clip.h, 0, performance.now() * 0.03, clip);
+  preview.draw(clipSource(clip), clip.w, clip.h, 0, nowSec(), clip);
 }
 function redraw() {
   scheduleSave();
@@ -1086,7 +1112,7 @@ function loop() {
     const now = performance.now();
     const cad = FX[project.adjust.effect].cadence;
     if (cad === 0 || now - lastPrevDraw > 1000 / cad) {
-      if (clipReady(c)) preview.draw(clipSource(c), c.w, c.h, 0, now * 0.03, c);
+      if (clipReady(c)) preview.draw(clipSource(c), c.w, c.h, 0, now / 1000, c);
       lastDrawn = c;
       lastPrevDraw = now;
     }
@@ -1273,7 +1299,7 @@ async function exportVideo() {
             if (idx === lastCadIdx) continue;
             lastCadIdx = idx;
           }
-          await pipe.draw(clip.img, clip.w, clip.h, 0, frameCount, clip);
+          await pipe.draw(clip.img, clip.w, clip.h, 0, ts / 1e6, clip);
           await pushFrame(ts, Math.round(1e6 / PHOTO_FPS));
         }
         offsetUs += Math.round(len * 1e6);
@@ -1300,7 +1326,7 @@ async function exportVideo() {
               if (idx === lastCadIdx) { frame.close(); return; }
               lastCadIdx = idx;
             }
-            await pipe.draw(frame, frame.displayWidth || frame.codedWidth, frame.displayHeight || frame.codedHeight, rot, frameCount, clip);
+            await pipe.draw(frame, frame.displayWidth || frame.codedWidth, frame.displayHeight || frame.codedHeight, rot, outTs / 1e6, clip);
             frame.close();
             await pushFrame(outTs, frame.duration ?? undefined);
             if (frameCount % 15 === 0)
