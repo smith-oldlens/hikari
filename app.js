@@ -66,7 +66,7 @@ function seekTo(video, t, fast) {
 // ===== 状態 =====
 // 実機検証の生命線。画面の版数と一致しないJSが動いていたら、それはキャッシュ・生き残ったタブの仕業。
 // 「押せない」系の報告が来たら、直す前にまずこの表示を確認してもらう（2026-08-15の教訓）
-const APP_VERSION = '2026-08-22c';
+const APP_VERSION = '2026-08-22d';
 // 作品の保存の形。**1 の時代に無かったもの**＝文字・つなぎの手動指定・おわり・音楽の位置とループ。
 // 形そのものは 1 のまま読めるが、**意味が変わった項目**（周辺減光）があるので、
 // どちらの時代に保存されたのかを見分けられるようにした。
@@ -525,7 +525,7 @@ function applyFilmProfileRecommendations(key) {
 // newAspect は新規作品を作るときの初期値だけに使い、既存の作品には触れない。
 const PRESETS = {
   diary: { key: 'diary', newAspect: '9:16', lut: 'mine', effect: 0, muteAll: false, impLen: 3, letterbox: false, autoAlign: true },
-  mv:    { key: 'mv', newAspect: '16:9', lut: 'airu', effect: 1, muteAll: true,  impLen: 2, letterbox: true,  autoAlign: true },
+  mv:    { key: 'mv', newAspect: '16:9', lut: 'airu', effect: 1, muteAll: true,  impLen: 5, letterbox: true,  autoAlign: true },
   film8: { key: 'film8', aspect: '4:3', newAspect: '4:3', lut: 'film8', effect: 2, muteAll: true, impLen: 3, letterbox: false, autoAlign: true, filmProfile: 'super8_reversal' },
 };
 // スイッチONで入れる値も同じ表から引く（表を2か所に持たない）
