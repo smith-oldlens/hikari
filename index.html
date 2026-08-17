@@ -2,7 +2,8 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- interactive-widget: キーボードが出たときに表示領域を縮めてもらう（入力欄が隠れないように） -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#111110">
 <title>ひかりを編む</title>
 <style>
@@ -13,20 +14,48 @@
   #app { max-width:560px; margin:0 auto; height:100dvh; display:flex; flex-direction:column; overflow:hidden; }
 
   header { display:flex; align-items:center; justify-content:space-between; padding:8px 12px 4px; gap:6px; flex:none; }
-  header .ttl { font-size:14px; font-weight:600; flex:none; }
+  header .ttl { font-size:14px; font-weight:600; flex:none; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #projectMenuBtn { min-width:0; max-width:45vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   header .presetBtn { font-size:11px; color:var(--sub); background:none; border:1px solid var(--line); border-radius:7px; padding:4px 8px; flex:none; }
   header .sp { flex:1; }
   header select { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:5px 6px; font-size:12px; }
   header .btn { padding:7px 12px; font-size:12px; }
 
   /* プレビューは残りの高さを占める（パネルを開くと自動で縮む） */
-  #previewWrap { padding:0 12px; flex:1 1 auto; min-height:90px; display:flex; }
-  #previewBox { position:relative; flex:1; background:#000; border-radius:10px; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  #previewWrap { padding:0 12px; flex:1 1 auto; min-height:160px; display:flex; }
+  /* touch-action:none が要る。manipulation のままだと、文字をつかんで指を動かした瞬間に
+     ブラウザがページを送り始め、pointercancel が飛んでドラッグが消える（実機でだけ起きる）。
+     プレビューはスクロールする場所ではないので、ここでのパンは捨ててよい。 */
+  #previewBox { position:relative; flex:1; background:#000; border-radius:10px; overflow:hidden; display:flex; align-items:center; justify-content:center;
+    -webkit-touch-callout:none; touch-action:none; }
+  /* 選んでいる文字の枠。掴める場所を見せるだけで、書き出しには入らない（canvasの外側） */
+  #textFrame { position:absolute; border:1px dashed var(--acc); border-radius:4px; pointer-events:none;
+    box-shadow:0 0 0 1px rgba(0,0,0,.45); display:none; }
+  #textFrame.on { display:block; }
+  /* 回すつまみ。枠の子なので、枠と一緒に傾く（＝いつも文字の真下に付いてくる）。
+     2本指の回転は他の操作と間違えやすいという実機評価を受けて、こちらへ替えた */
+  #textRotKnob { position:absolute; left:50%; bottom:-34px; width:30px; height:30px; margin-left:-15px;
+    border-radius:50%; background:var(--acc); border:2px solid #191917; pointer-events:auto;
+    touch-action:none; box-shadow:0 1px 4px rgba(0,0,0,.5); }
+  /* つまみと枠をつなぐ線。どこを掴めば回るのかを示す */
+  #textRotKnob::before { content:''; position:absolute; left:50%; top:-12px; width:1px; height:12px;
+    margin-left:-.5px; background:var(--acc); opacity:.8; }
+  /* つまみの中の回転マーク */
+  #textRotKnob::after { content:'↻'; position:absolute; inset:0; display:flex; align-items:center;
+    justify-content:center; font-size:16px; color:#191917; }
+  /* 吸着した線。出していないと「なぜ指どおりに動かないのか」が分からない */
+  .snapGuide { position:absolute; background:var(--acc); opacity:.75; pointer-events:none; display:none; }
+  #snapGuideX { width:1px; }
+  #snapGuideY { height:1px; }
+  .snapGuide.on { display:block; }
+  #beforeBadge { position:absolute; top:8px; left:8px; font-size:10px; padding:3px 9px; border-radius:6px;
+    background:rgba(216,160,91,.22); border:1px solid var(--acc); color:var(--acc); pointer-events:none; }
   #previewCanvas { display:block; max-width:100%; max-height:100%; }
   #emptyHint { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--sub); font-size:13px; text-align:center; padding:0 20px; }
 
   #transport { display:flex; align-items:center; justify-content:center; gap:14px; padding:4px 0 0; flex:none; }
   #playBtn { width:36px; height:36px; border-radius:50%; border:none; background:var(--acc); color:#191917; font-size:15px; cursor:pointer; flex:none; }
+  #undoBtn, #redoBtn { min-width:44px; min-height:44px; padding:0; }
   #timeLabel { font-size:12px; color:var(--sub); min-width:86px; text-align:center; }
 
   /* タイムライン: 時間目盛 → クリップ帯 → 音楽トラック */
@@ -42,7 +71,9 @@
   .musicBar.empty { background:none; border:1px dashed var(--line); color:var(--sub); }
   .clipBlock { position:absolute; top:0; height:56px; border-radius:6px; overflow:hidden; background-color:#333; background-size:cover; background-position:center; cursor:pointer; box-shadow:0 0 0 1px rgba(0,0,0,.5) inset; }
   .clipBlock.sel { box-shadow:0 0 0 2px var(--acc) inset; }
-  .clipBlock.dragging { opacity:.85; z-index:20; box-shadow:0 0 0 2px var(--acc) inset, 0 4px 10px rgba(0,0,0,.5); }
+  /* 並び替え中はブラウザの横スクロールに指を渡さない（渡すとpointercancelで並び替えが中断する） */
+  .clipBlock.dragging { opacity:.85; z-index:20; box-shadow:0 0 0 2px var(--acc) inset, 0 4px 10px rgba(0,0,0,.5); touch-action:none; }
+  #timelineScroll.dragging { touch-action:none; }
   .clipBlock .lbl { position:absolute; right:3px; bottom:2px; font-size:9px; color:#fff; text-shadow:0 0 2px #000,0 0 2px #000; line-height:1; }
   .clipBlock .mk { position:absolute; left:3px; top:2px; font-size:11px; text-shadow:0 0 2px #000; line-height:1; }
   .trimHandle { position:absolute; top:0; bottom:0; width:15px; background:var(--acc); touch-action:none; z-index:10; }
@@ -60,11 +91,16 @@
 
   nav { display:flex; border-top:1px solid var(--line); background:var(--panel); flex:none; }
   nav button { flex:1; background:none; border:none; color:var(--sub); font-size:11px; padding:8px 0 10px; cursor:pointer; }
-  nav button .ic { display:block; font-size:17px; margin-bottom:2px; }
+  nav button .ic, nav button svg { display:block; width:20px; height:20px; margin:0 auto 3px; }
   nav button.on { color:var(--fg); font-weight:600; }
+  #clipTools [data-act=clipDel] { color:#e8736a; }
+  #clipTools [data-act=clipBack] { color:var(--acc); }
+  nav[hidden] { display:none; }
 
   /* パネルは画面の一部を占める引き出し。中身が長いときだけパネル内でスクロールする */
-  .panel { display:none; background:var(--panel); padding:10px 14px 14px; flex:none; max-height:34vh; overflow-y:auto; -webkit-overflow-scrolling:touch; }
+  /* 上限いっぱいまで使うシート（質感）でナビが4px画面外へ出たため、42dvhから6px引く。
+     42dvhは「プレビューを半分残す」という決めごとで、4pxはその決めごとを壊さない誤差。 */
+  .panel { display:none; background:var(--panel); padding:10px 14px 14px; flex:none; max-height:calc(42dvh - 6px); overflow-y:auto; -webkit-overflow-scrolling:touch; }
   .panel.on { display:block; }
   .row { display:flex; align-items:center; gap:10px; margin:8px 0; }
   .row label { font-size:12px; color:var(--sub); flex:none; width:5.5em; }
@@ -78,6 +114,174 @@
   .chips { display:flex; gap:8px; flex-wrap:wrap; }
   .chip { background:var(--card); border:1px solid var(--line); color:var(--fg); border-radius:16px; padding:6px 13px; font-size:12px; cursor:pointer; }
   .chip.on { background:var(--acc); color:#191917; border-color:var(--acc); font-weight:600; }
+
+  /* ===== v5 道具型: 道具の列＋作業面 =====
+     押すと画面が変わるもの（道具）・値を選ぶもの（チップ/カード）・ON/OFF（スイッチ）を見た目で分ける */
+  /* 動きの作業面: 2行カードの2列グリッド。タップでON/OFF、ONは金縁＋値バッジ */
+  .fxCards { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-bottom:6px; }
+  /* 一括ボタンは高さの余裕がないので詰める（動きの作業面は上限ぎりぎり） */
+  /* 【2026-08-16】.actRow2 の display:flex が [hidden] の display:none に勝ってしまい、
+     隠したはずの道具（一括ボタン・おわりの色）が出っぱなしになっていた。属性側を強くする */
+  .actRow2[hidden], .row[hidden] { display:none !important; }
+  #transBulk { gap:7px; }
+  #transBulk .btn { padding:7px 6px; font-size:11.5px; }
+  .fxcard { background:var(--card); border:1px solid var(--line); border-radius:11px;
+    position:relative; min-height:48px; display:flex; align-items:center; overflow:hidden; }
+  /* 【2026-08-16】カードが6枚（3行）になり42dvhからはみ出した。動きタブだけ高さを詰める。
+     44pxでも指で押せることはv5-16で確認済み（実効44pxの決めごとは守る） */
+  #motionCards .fxcard { min-height:44px; }
+  #motionCards .fxcard .body { padding:5px 4px 5px 9px; }
+  #motionCards .fxcard .ds { font-size:9px; margin-top:0; line-height:1.2; }
+  #motionCards .fxcard .nm { line-height:1.25; }
+  #motionCards { gap:6px; margin-bottom:5px; }
+  /* 動きタブだけ、上の道具列と見出しの余白も詰める（カード6枚ぶんの高さを作る） */
+  body:has(#work-motion:not([hidden])) #colorTools { margin:0 0 4px; }
+  body:has(#work-motion:not([hidden])) #presetToggle { margin:0 0 3px; }
+  body:has(#work-motion:not([hidden])) .panel.on { padding-bottom:10px; }
+  .fxcard .body { flex:1; min-width:0; background:none; border:none; color:var(--fg); text-align:left;
+    padding:7px 4px 7px 10px; touch-action:manipulation; }
+  .fxcard .nm { display:block; font-size:12.5px; font-weight:600; }
+  .fxcard .ds { display:block; font-size:9.5px; color:var(--sub); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* 入切トグル。カード本体のタップ（＝調整バーを出す）と役割を分ける */
+  .fxcard .tg { flex:none; width:44px; height:100%; background:none; border:none; padding:0;
+    display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
+  .fxcard .tg i { width:30px; height:18px; border-radius:9px; background:#3a3a42; position:relative; transition:background .15s; }
+  .fxcard .tg i::after { content:''; position:absolute; left:3px; top:3px; width:12px; height:12px; border-radius:50%;
+    background:#c9c4b8; transition:transform .15s; }
+  .fxcard.on .tg i { background:var(--acc); }
+  .fxcard.on .tg i::after { transform:translateX(12px); background:#191917; }
+  .fxcard.on { border-color:var(--acc); background:#2b2820; }
+  /* いま調整バーに出ているカード */
+  .fxcard.sel { box-shadow:0 0 0 2px var(--acc) inset; }
+  .fxcard.on .nm::after { content:attr(data-v); margin-left:6px; font-size:10.5px; color:var(--acc); font-weight:700; }
+  .fxcard.dis { opacity:.45; }
+  /* 読み込めなかった書体は選べても意味がないので、見て分かるように落とす */
+  #textFonts .card.dis { opacity:.4; }
+  #textFonts .card.dis .nm { color:var(--sub); }
+  /* カットの境目の印。タイムライン上に小さく出す */
+  .transMark { position:absolute; top:-3px; transform:translateX(-50%); z-index:12;
+    width:22px; height:18px; padding:0; font-size:11px; line-height:18px; text-align:center;
+    background:rgba(20,20,18,.85); color:var(--sub); border:1px solid var(--line); border-radius:6px;
+    touch-action:manipulation; }
+  .transMark.on { color:var(--acc); border-color:var(--acc); }
+  #transPicker { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none;
+    align-items:flex-end; justify-content:center; z-index:60; }
+  #transPicker.on { display:flex; }
+  #transPicker .pickCard { width:min(560px,100%); background:var(--panel); border-radius:16px 16px 0 0;
+    padding:14px; display:flex; flex-direction:column; gap:8px; }
+  #transPicker .title { font-size:12px; color:var(--sub); margin-bottom:2px; }
+  #transPicker .btn { width:100%; padding:12px; font-size:14px; }
+  /* 選択中は「枠だけ」を強調する。--acc はほぼ白(#f4f3ef)なので、共通の .btn.on
+     （背景=acc）と重なると白地に白文字になって読めなかった。背景は必ず戻す。 */
+  #transPicker .btn.on { background:rgba(244,243,239,.10); color:var(--fg);
+    border-color:var(--acc); border-width:2px; font-weight:600; }
+  .toolRow { display:flex; gap:2px; overflow-x:auto; scrollbar-width:none; margin:2px 0 8px; }
+  .toolRow::-webkit-scrollbar { display:none; }
+  .tool { flex:0 0 52px; min-height:52px; background:none; border:none; border-radius:10px; padding:7px 0 5px;
+    color:var(--sub); display:flex; flex-direction:column; align-items:center; gap:3px; touch-action:manipulation; }
+  .tool svg { width:20px; height:20px; }
+  .tool span { font-size:9px; letter-spacing:.02em; }
+  .tool.on { background:#33333b; color:var(--fg); }
+  .work[hidden] { display:none; }
+  .workHead { display:flex; align-items:center; gap:8px; margin-bottom:2px; }
+  .workHead .btn.sm { padding:5px 10px; }
+  .workHead .rowLbl { margin:0; flex:1; }
+  /* ON/OFFはスイッチの形にして、道具・値と混同しないようにする */
+  /* touch-action:manipulation はスクロールを許すため、スイッチの上で指が数px動くと
+     ブラウザがスクロールを始めてタップが取り消される（実機で「感光が入らない」になった）。
+     スイッチは面積が広く、ここから画面を送りたい場面もないので、ジェスチャを渡さない */
+  .sw { display:flex; align-items:center; gap:10px; padding:4px 0; font-size:12px; color:var(--fg); touch-action:none; }
+  /* 質感の作業面はスイッチが増えるほど縦が厳しい。ここだけ詰める（他のスイッチ行は据え置き） */
+  /* スイッチが4本（手ブレ・感光・つなぎ・コマ落ち）並ぶので、ここだけ徹底的に詰める */
+  /* スイッチ4本は2列に畳む。縦に並べると質感シートが上限を超える */
+  .swGrid { display:grid; grid-template-columns:1fr 1fr; column-gap:14px; }
+  #work-fx .sw { padding:0; font-size:11.5px; min-height:26px; }
+  #work-fx .sw i { height:18px; width:31px; }
+  #work-fx .sw i::after { width:12px; height:12px; top:3px; left:3px; }
+  #work-fx .sw input:checked + i::after { transform:translateX(13px); }
+  .sw span { flex:1; }
+  .sw input { position:absolute; opacity:0; width:0; height:0; }
+  .sw i { flex:none; width:40px; height:24px; border-radius:12px; background:#3a3a42; position:relative; transition:background .15s; }
+  .sw i::after { content:''; position:absolute; left:3px; top:3px; width:18px; height:18px; border-radius:50%;
+    background:#f4f3ef; transition:transform .15s; }
+  .sw input:checked + i { background:var(--acc); }
+  .sw input:checked + i::after { transform:translateX(16px); background:#191917; }
+
+  /* ===== v4 見た目シート（統合案）: カード1行＋チップ1行＋スライダー1本 ===== */
+  .rowLbl { font-size:10px; color:var(--sub); letter-spacing:.1em; margin:0 0 3px; }
+  /* 横スクロールの行。縦に積まないことでシート高を一定に保つ */
+  .cardRow, .chipRow { display:flex; gap:8px; overflow-x:auto; overflow-y:hidden;
+    scrollbar-width:none; -webkit-overflow-scrolling:touch; padding-bottom:2px; }
+  /* display を明示すると hidden 属性が効かなくなる。行の出し分けはこの1行に依存している */
+  .cardRow[hidden], .chipRow[hidden] { display:none; }
+  .cardRow::-webkit-scrollbar, .chipRow::-webkit-scrollbar { display:none; }
+  .cardRow { margin-bottom:8px; }
+  .card { flex:0 0 auto; width:64px; background:none; border:none; padding:0; cursor:pointer;
+    display:flex; flex-direction:column; align-items:center; gap:3px; }
+  .card .th { width:64px; height:64px; border-radius:11px; border:2px solid transparent; display:block; }
+  .card.on .th { border-color:var(--acc); }
+  .card .nm { font-size:9px; color:var(--sub); white-space:nowrap; }
+  .card.on .nm { color:var(--fg); font-weight:600; }
+  /* B1は静的な色見本。現在フレームのライブサムネイル化はB2で行う */
+  .th-diary { background:linear-gradient(160deg,#f3d9c6,#c98f6a 55%,#6d4b38); }
+  .th-mv    { background:linear-gradient(160deg,#cfe0ea,#7f9db4 55%,#3d5163); }
+  .th-film8 { background:linear-gradient(160deg,#f0dcb4,#c79a5f 55%,#6b4f2d); }
+  /* チップは見た目30px・実効タップ領域44px（上下に透明な余白を持たせる） */
+  .chipRow .chip { flex:0 0 auto; height:30px; margin:7px 0; display:inline-flex; align-items:center; gap:5px;
+    padding:0 12px; font-size:11px; white-space:nowrap; position:relative; touch-action:manipulation; }
+  .chipRow .chip::before { content:''; position:absolute; left:0; right:0; top:-7px; bottom:-7px; }
+  .chipRow .chip b { font-size:10px; color:var(--acc); font-weight:600; }
+  .chipRow .chip.on b { color:#191917; }
+  .chipRow .chip b:empty { display:none; }
+  /* 別の行へ入る「色」「質感」は、その場で値を変えるチップと役割が違うので見た目を分ける */
+  .chipRow .chip.drill { background:#2b2b31; border-color:#3a3a42; color:var(--fg); }
+  .chipRow .chip.drill b { color:var(--acc); }
+  .drillHead { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+  /* HSLの8色相。押せる面積は44px確保しつつ、見た目の丸は26px */
+  .chan { display:flex; gap:6px; justify-content:space-between; padding:2px 0 6px; }
+  .chan button { width:26px; height:26px; padding:0; border-radius:50%; border:2px solid transparent;
+    position:relative; touch-action:manipulation; margin:9px 0; }
+  .chan button::before { content:''; position:absolute; left:-4px; right:-4px; top:-9px; bottom:-9px; }
+  .chan button.on { border-color:#fff; }
+  .chan button.adj::after { content:''; position:absolute; bottom:-7px; left:50%; transform:translateX(-50%);
+    width:4px; height:4px; border-radius:50%; background:var(--acc); }
+  #curveWrap { display:flex; justify-content:center; padding:2px 0 4px; }
+  /* 細かく追い込めるよう、置ける幅いっぱいまで大きくする */
+  /* シート内でスクロールさせないため、高さの上限から逆算して幅を決める */
+  /* 42dvhから 見出し+道具列+ヒント+余白 を引いた残りへ収める（シート内スクロールを出さない） */
+  /* 波形。高さはシートの上限(42dvh)を圧迫しないよう固定。横スクロールはしない＝曲全体が常に見える */
+  /* 音楽シートは縦スクロールさせない。中身を詰めて42dvhに収める。
+     360x740（狭い端末）で4pxはみ出したので、行の間をさらに詰めた */
+  #panel-music .hint { margin:1px 0 0; line-height:1.35; }
+  #panel-music .divider { margin:5px 0; }
+  #panel-music .chk { margin:1px 0; }
+  #panel-music .row { margin:2px 0; }
+  #musicWaveWrap { margin:3px 0 0; }
+  #musicWave { display:block; width:100%; height:56px; border-radius:8px; background:#181816;
+    touch-action:none; }   /* この2日の教訓: 指が数px動くとブラウザがスクロールを始めてタップが消える */
+  #curveSvg { width:100%; max-width:min(340px, calc((42dvh - 144px) * 300 / 230)); height:auto;
+    background:var(--card); border:1px solid var(--line); border-radius:10px; touch-action:none; }
+  #presetToggle[hidden] { display:none; }
+  #presetToggle { height:30px; margin:2px 0 6px; padding:0 12px; font-size:11px; display:inline-flex;
+    align-items:center; gap:5px; touch-action:manipulation; }
+  #presetToggle b { font-size:10px; color:var(--sub); font-weight:400; }
+  .drillHead .rowLbl { margin:0; }
+  #filmDetail, #motionDetail, #leakDetail, #transDetail, #judderDetail { display:contents; }
+  #filmDetail[hidden] { display:none; }
+  /* スライダーは1本だけ見せる。<input type=range> のまま残すことでUndoと既存配線を保つ */
+  #sliderHost .row, #sliderHost .hint, #clipSliderHost .row { display:none; }
+  #sliderHost .row.on, #clipSliderHost .row.on { display:flex; }
+  #sliderHost #rowFilmProfile.on ~ #filmProfileHint { display:block; margin:0; }
+  /* フェーダーではなく選ぶ道具（収め方）。ラベルは他の行と同じ幅にそろえる。
+     文字を折り返させない——3つ並ぶと1つあたりが細く、折り返すと行の高さが揃わなくなる */
+  .segRow { display:flex; gap:6px; flex:1; }
+  .segRow .btn { flex:1; padding:8px 2px; font-size:11px; white-space:nowrap; }
+  #panel-color input[type=range] { touch-action:manipulation; }
+  .hiddenCtl { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+  /* 取り込みの設定は最初の1回だけ使うので、既定でたたむ（普段はタイムラインで調整する） */
+  #importToggle { height:30px; margin:2px 0 6px; padding:0 12px; font-size:11px; display:inline-flex; align-items:center; gap:5px; touch-action:manipulation; }
+  #importToggle b { font-size:10px; color:var(--sub); font-weight:400; }
+  #importSettings[hidden] { display:none; }
   .hint { font-size:11px; color:var(--sub); line-height:1.6; margin:6px 0; }
   select { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 8px; font-size:13px; }
   .divider { border-top:0.5px solid var(--line); margin:10px 0; }
@@ -92,10 +296,63 @@
   #progFill { height:100%; width:0%; background:var(--acc); }
   #outVideo { width:100%; border-radius:10px; background:#000; margin-top:8px; display:none; }
   /* ログと開発ボタンはレイアウトを押し出さないよう浮かせる */
-  #log { position:fixed; left:0; right:0; bottom:58px; z-index:40; margin:0; font-size:11px; color:#e08a86; white-space:pre-wrap; word-break:break-all; max-height:5em; overflow:auto; }
+  /* シートを常設するv4では、エラー表示が操作行を覆わないよう画面上端へ出す */
+  #log { position:fixed; left:0; right:0; top:0; z-index:70; margin:0; font-size:11px; color:#e08a86; white-space:pre-wrap; word-break:break-all; max-height:5em; overflow:auto; }
   #log:not(:empty) { padding:6px 14px; background:rgba(0,0,0,.85); }
-  #devbar { display:none; position:fixed; left:4px; top:44px; z-index:45; flex-direction:column; gap:4px; }
-  #devbar .btn { padding:4px 7px; font-size:10px; opacity:.75; }
+  /* 開発用は既定でたたむ。プレビューに重ねない（右上の小さなチップから開く） */
+  #devToggle { display:none; position:fixed; right:6px; top:110px; z-index:46; font-size:10px; color:var(--sub);
+    background:rgba(30,30,36,.85); border:1px solid var(--line); border-radius:999px; padding:5px 10px; }
+  #devToggle.shown { display:block; }
+  #devbar { display:none; position:fixed; right:6px; top:140px; z-index:45; flex-direction:column; gap:4px; align-items:flex-end; }
+  #devbar.on { display:flex; }
+  #devbar .btn { padding:4px 7px; font-size:10px; opacity:.9; background:rgba(30,30,36,.9); }
+  /* 【2026-08-17】全画面の入力シートはやめた。別画面へ飛ぶと、打った字がどう見えるか分からず
+     「決定→確認→書きかえる」を往復することになる。プレビューの文字に直に重ねて打つ。
+     位置・書体・大きさ・傾きはJS側で文字に合わせる（ここでは器だけ決める） */
+  #textInline { display:none; position:absolute; z-index:12; background:rgba(0,0,0,.28);
+    border:1px dashed var(--acc); border-radius:4px; padding:0; margin:0; resize:none; overflow:hidden;
+    text-align:center; caret-color:var(--acc); outline:none; white-space:pre; }
+  #textInline.on { display:block; }
+  #textSliderHost .row { display:none; }
+  #textSliderHost .row.on { display:flex; }
+  /* 追加ボタンは幅いっぱいの2分割。一覧のカードとはっきり別物に見せる */
+  .actRow2 { display:flex; gap:8px; margin-bottom:8px; }
+  .actRow2 .btn { flex:1; padding:10px 0; font-size:12px; }
+  /* 一覧は実際の書体・色で描く（同じ見た目のチップだと区別できない） */
+  #textList .tcard { flex:0 0 auto; min-width:72px; max-width:120px; height:46px; padding:4px 10px;
+    background:#20242c; border:1px solid #2f3742; border-radius:9px; color:var(--fg);
+    display:flex; align-items:center; justify-content:center; overflow:hidden; white-space:nowrap;
+    font-size:13px; margin:7px 0; position:relative; touch-action:manipulation; }
+  #textList .tcard::before { content:''; position:absolute; left:0; right:0; top:-7px; bottom:-7px; }
+  #textList .tcard.on { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc) inset; }
+  #textEdit[hidden], #textFonts[hidden], #textColors[hidden] { display:none; }
+  #textColors button { width:26px; height:26px; padding:0; border-radius:50%; border:2px solid transparent;
+    flex:0 0 auto; margin:9px 0; touch-action:manipulation; }
+  #textColors button.on { border-color:#fff; }
+  /* 追加ボタンと「入れた文字」の一覧を見分けられるようにする（同じ見た目だと押し間違える） */
+  #textList .chip { background:#20242c; border-color:#2f3742; }
+  #textList .chip::after { content:'✎'; margin-left:5px; color:var(--sub); font-size:10px; }
+  #textList .chip.on { background:var(--acc); color:#191917; border-color:var(--acc); font-weight:600; }
+  #textList .chip.on::after { color:#191917; }
+  #textListLabel[hidden] { display:none; }
+  #traceSheet { display:none; position:fixed; inset:8px; z-index:60; background:#15151a; border:1px solid #2a2a30;
+    border-radius:12px; padding:8px; flex-direction:column; gap:6px; }
+  #traceSheet.on { display:flex; }
+  #traceText { flex:1; width:100%; background:#0d0d0f; color:#e8e6e1; border:1px solid #2a2a30; border-radius:8px;
+    font:11px/1.5 ui-monospace, monospace; padding:6px; resize:none; -webkit-user-select:text; user-select:text; }
+  #projectSheet { display:none; position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.6); padding:env(safe-area-inset-top,12px) 12px 12px; }
+  #projectSheet.on { display:flex; align-items:flex-end; justify-content:center; }
+  #projectSheetCard { width:min(560px,100%); max-height:min(80dvh,720px); overflow:auto; background:var(--panel); border:1px solid var(--line); border-radius:16px 16px 10px 10px; padding:14px; }
+  #projectList { display:grid; gap:8px; margin:12px 0; }
+  .projectItem { text-align:left; min-height:54px; padding:9px 10px; border:1px solid var(--line); border-radius:9px; background:var(--card); color:var(--fg); }
+  .projectItem.current { outline:2px solid var(--acc); }
+  .projectItem small { display:block; color:var(--sub); margin-top:3px; }
+  .projectActions { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .projectActions button, #closeProjectSheet { min-width:44px; min-height:44px; }
+  .projectActions .danger { color:#f1b1aa; border-color:#744; }
+  #renameRow input { flex:1; min-width:0; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:9px; font-size:16px; }
+  #renameRow button { min-width:44px; min-height:44px; }
+  #projectActionStatus,#projectStorageInfo { font-size:12px; color:var(--sub); white-space:pre-wrap; margin:9px 0; }
 
   /* 新規プロジェクト/プリセット シート */
   #presetSheet { display:none; position:fixed; inset:0; z-index:50; background:rgba(0,0,0,.55); align-items:flex-end; justify-content:center; }
@@ -107,18 +364,54 @@
   .presetCard .pn { font-size:14px; margin:0; font-weight:600; }
   .presetCard .pd { font-size:10.5px; color:var(--sub); margin:3px 0 0; line-height:1.5; }
   #presetContinue { display:block; width:100%; background:none; border:none; color:var(--sub); font-size:12px; padding:8px 0 0; text-align:center; }
+  #saveStatus { color:var(--sub); font-size:11px; white-space:nowrap; }
+  #appVer { color:var(--sub); font-size:10px; white-space:nowrap; opacity:.7; background:none; border:none; padding:2px 4px; touch-action:manipulation; }
+  #appVer.stale { color:#e8a09a; opacity:1; font-weight:600; }
+  #saveStatus.error, #durationBudget.over, #exportWarnings { color:#e8a09a; }
+  #durationBudget { font-size:11px; color:var(--sub); white-space:nowrap; }
+  #retrySaveBtn { display:none; }
+  #retrySaveBtn.on { display:inline-block; }
+  #exportSummary, #exportWarnings { font-size:12px; line-height:1.65; white-space:pre-line; margin:8px 0; }
+  details > summary { color:var(--sub); cursor:pointer; font-size:12px; padding:8px 0; }
+  #goExportBtn { white-space:nowrap; min-width:72px; }
+  @media (max-width:480px) {
+    header { display:grid; grid-template-columns:minmax(0,1fr) auto auto; grid-template-areas:"title status preset" "aspect aspect export"; align-items:center; row-gap:4px; padding:4px 12px; }
+    header .ttl { grid-area:title; min-width:0; }
+    #saveStatus { grid-area:status; justify-self:end; }
+    #openPresetBtn { grid-area:preset; justify-self:end; }
+    header .sp { display:none; }
+    #aspectSel { grid-area:aspect; justify-self:start; width:min(150px,100%); height:44px; }
+    #goExportBtn { grid-area:export; justify-self:end; width:auto; min-width:84px; height:44px; white-space:nowrap; }
+  }
+  @media (min-width:820px) {
+    #app { max-width:none; width:min(1440px, 100%); padding:0 12px; display:grid; grid-template-columns:minmax(0,1fr) clamp(360px,33vw,420px); grid-template-rows:42px minmax(360px,1fr) 44px 106px; grid-template-areas:"header header" "preview panel" "transport panel" "timeline nav"; column-gap:12px; }
+    header { grid-area:header; padding-left:0; padding-right:0; }
+    #previewWrap { grid-area:preview; padding:0; min-height:360px; }
+    #transport { grid-area:transport; }
+    #timelineWrap { grid-area:timeline; }
+    .panel { grid-area:panel; max-height:none; min-height:0; border-radius:12px; margin:0; }
+    nav { grid-area:nav; border:1px solid var(--line); border-radius:12px 12px 0 0; }
+    /* 2カラムでは行を折り返し、パネルは中身の高さに合わせる（右列に空の箱を作らない） */
+    .cardRow, .chipRow { flex-wrap:wrap; overflow-x:visible; }
+    .panel { align-self:start; max-height:calc(100dvh - 100px); overflow-y:auto; }
+    #presetSheetCard { max-width:680px; }
+  }
+  #openPresetBtn, #goExportBtn, #playBtn, #addClipBtn, nav button, #runExport, #retrySaveBtn { min-width:44px; min-height:44px; }
 </style>
 </head>
 <body>
 <div id="app">
   <header>
-    <span class="ttl">ひかりを編む</span>
+    <button class="presetBtn ttl" id="projectMenuBtn" aria-label="作品一覧を開く"><span id="projectNameLabel">ひかりを編む</span></button>
+    <span id="saveStatus" aria-live="polite">保存済み</span>
+    <button id="appVer" type="button" title="タップで診断ログ"></button>
     <button class="presetBtn" id="openPresetBtn">プリセット</button>
     <span class="sp"></span>
     <select id="aspectSel">
       <option value="16:9">16:9 よこ</option>
       <option value="9:16">9:16 たて</option>
       <option value="4:5">4:5</option>
+      <option value="4:3">4:3</option>
     </select>
     <button class="btn primary" id="goExportBtn">書き出し</button>
   </header>
@@ -126,14 +419,23 @@
   <div id="previewWrap">
     <div id="previewBox">
       <canvas id="previewCanvas" width="960" height="540"></canvas>
+      <div id="textFrame"><div id="textRotKnob"></div></div>
+      <div id="snapGuideX" class="snapGuide"></div>
+      <div id="snapGuideY" class="snapGuide"></div>
+      <!-- プレビューの文字をタップすると、その場に重なって出る入力欄。
+           別画面へ飛ばさず、打った字がそのまま作品の見た目になる -->
+      <textarea id="textInline" maxlength="120" rows="1" spellcheck="false"></textarea>
+      <div id="beforeBadge" hidden>調整前</div>
       <div id="emptyHint">右下の＋から動画・写真を追加してください</div>
     </div>
   </div>
 
   <div id="transport">
     <span id="timeLabel">0:00 / 0:00</span>
+    <button class="btn sm" id="undoBtn" aria-label="戻す（次の操作はありません）" disabled>↶</button>
     <button id="playBtn">▶</button>
-    <span style="min-width:88px"></span>
+    <button class="btn sm" id="redoBtn" aria-label="やり直す（次の操作はありません）" disabled>↷</button>
+    <span id="durationBudget">0.0 / 30秒</span>
   </div>
 
   <div id="timelineWrap">
@@ -158,81 +460,292 @@
   <input type="file" id="lutFileInput" accept=".cube" hidden>
   <input type="file" id="musicFileInput" accept="audio/*" hidden>
 
+  <button id="devToggle">dev ▾</button>
   <div id="devbar">
     <button class="btn sm" id="devClip">サンプル動画</button>
     <button class="btn sm" id="devPhoto">サンプル写真</button>
     <button class="btn sm" id="devMusic">サンプル音楽</button>
+    <button class="btn sm" id="devFailSave">次の保存を失敗</button>
+    <button class="btn sm" id="devTrace">ログを見る</button>
+  </div>
+  <div id="traceSheet">
+    <div class="row" style="justify-content:space-between; align-items:center">
+      <b style="font-size:12px">診断ログ（最新50件）</b>
+      <span style="display:flex; gap:6px">
+        <button class="btn sm" id="traceCopy">コピー</button>
+        <button class="btn sm" id="traceClear">消す</button>
+        <button class="btn sm" id="traceClose">閉じる</button>
+      </span>
+    </div>
+    <textarea id="traceText" readonly spellcheck="false"></textarea>
   </div>
 
   <div class="panel" id="panel-clips">
-    <div class="row">
-      <label>取り込み長さ</label>
-      <select id="presetSel">
-        <option value="2">先頭から2秒</option>
-        <option value="3" selected>先頭から3秒</option>
-        <option value="5">先頭から5秒</option>
-        <option value="0">全部</option>
-      </select>
-      <button class="btn sm" id="applyLenBtn">取り込み済みにも適用</button>
-    </div>
-    <div class="row">
-      <label>収め方</label>
-      <select id="fitSel">
-        <option value="contain" selected>切れないように収める</option>
-        <option value="cover">画面いっぱい（切り抜き）</option>
-      </select>
+    <div id="importSettings">
+      <button class="chip" id="importToggle" aria-expanded="false">取り込みの設定 ▾<b></b></button>
+      <div id="importRows" hidden>
+        <div class="row">
+          <label>取り込み長さ</label>
+          <select id="presetSel">
+            <option value="2">先頭から2秒</option>
+            <option value="3" selected>先頭から3秒</option>
+            <option value="5">先頭から5秒</option>
+            <option value="0">全部</option>
+          </select>
+          <button class="btn sm" id="applyLenBtn">取り込み済みにも適用</button>
+        </div>
+        <div class="row">
+          <label>収め方</label>
+          <select id="fitSel">
+            <option value="contain" selected>切れないように収める</option>
+            <option value="cover">画面いっぱい（切り抜き）</option>
+          </select>
+        </div>
+      </div>
     </div>
     <div id="clipEdit" style="display:none">
       <div class="divider"></div>
       <div class="clipPanel">
         <p class="title" id="clipTitleLabel">クリップ 1</p>
-        <div class="row"><label>明るさ補正</label><input type="range" id="clipBright" min="-100" max="100" value="0"><output>0</output></div>
-        <div class="row"><label>色温度補正</label><input type="range" id="clipTemp" min="-100" max="100" value="0"><output>0</output></div>
-        <p class="hint" id="autoReadout"></p>
-        <div class="actRow">
-          <button class="btn sm" id="moveL">◀ 前へ</button>
-          <button class="btn sm" id="moveR">後ろへ ▶</button>
+        <div class="toolRow" id="clipTools">
+      <button class="tool" data-act="clipColor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10M18 8h2M4 16h2M10 16h10"/><circle cx="16" cy="8" r="2"/><circle cx="7" cy="16" r="2"/></svg><span>色</span></button>
+      <button class="tool" data-act="clipHsl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="10" r="5"/><circle cx="15" cy="10" r="5"/><circle cx="12" cy="15.5" r="5"/></svg><span>HSL</span></button>
+      <button class="tool" data-act="clipCurve"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" opacity=".35"/><path d="M4 20 C 9 19, 10 13, 12 12 S 19 6, 20 4"/></svg><span>カーブ</span></button>
+      <button class="tool" data-act="clipOrder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16M4 15h16"/><path d="M8 6L5 9l3 3M16 12l3 3-3 3"/></svg><span>並び</span></button>
+      <button class="tool" data-act="clipMute"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9l4 6M21 9l-4 6"/></svg><span>ミュート</span></button>
+      <button class="tool" data-act="clipDup"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="13" height="13" rx="2"/><path d="M16 19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2"/></svg><span>複製</span></button>
+      <button class="tool" data-act="clipDel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></svg><span>削除</span></button>
+      <button class="tool" data-act="clipBack"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5l-7 7 7 7"/><path d="M4 12h16"/></svg><span>選択を解除</span></button>
+        </div>
+        <div id="clipColorSec">
+          <div class="chipRow" id="clipChips">
+            <button class="chip" data-slider="clipBright">明るさ<b></b></button>
+            <button class="chip" data-slider="clipTemp">色温度<b></b></button>
+            <button class="chip" data-slider="clipFxScale">質感の強さ<b></b></button>
+            <button class="chip" data-slider="clipHighKey">ハイキー<b></b></button>
+            <button class="chip" data-slider="clipFit">収め方<b></b></button>
+          </div>
+          <div id="clipSliderHost">
+            <div class="row"><label>明るさ補正</label><input type="range" id="clipBright" min="-100" max="100" value="0"><output>0</output></div>
+            <div class="row"><label>色温度補正</label><input type="range" id="clipTemp" min="-100" max="100" value="0"><output>0</output></div>
+            <div class="row"><label>質感の強さ</label><input type="range" id="clipFxScale" min="0" max="100" value="100"><output>100</output></div>
+            <div class="row"><label>ハイキー（白く飛ばす）</label><input type="range" id="clipHighKey" min="0" max="100" value="0"><output>0</output></div>
+            <!-- このクリップだけの収め方。よこの作品にたての1本が混ざったとき、そこだけ帯を消せる -->
+            <div class="row"><label>収め方</label>
+              <span id="clipFit" class="segRow">
+                <button class="btn sm" data-fit="">作品と同じ</button>
+                <button class="btn sm" data-fit="contain">切れない</button>
+                <button class="btn sm" data-fit="cover">いっぱい</button>
+              </span>
+            </div>
+          </div>
+          <p class="hint" id="autoReadout"></p>
+        </div>
+        <div id="clipOrderSec" hidden>
+          <div class="actRow">
+            <button class="btn sm" id="moveL">◀ 前へ</button>
+            <button class="btn sm" id="moveR">後ろへ ▶</button>
+          </div>
+          <p class="hint">タイムラインの端をドラッグすると長さを変えられます。</p>
+        </div>
+        <span class="hiddenCtl">
           <button class="btn sm" id="muteClipBtn">🔇 ミュート</button>
           <button class="btn sm" id="dupClip">複製</button>
           <button class="btn sm" id="delClip">削除</button>
-        </div>
+        </span>
       </div>
     </div>
     <p class="hint" id="clipHint">クリップをタップで選択。端をドラッグでトリム、長押しで並び替え。2本指で時間の拡大・縮小。</p>
-    <div class="divider"></div>
-    <div class="row">
-      <span class="hint" style="flex:1">編集内容は自動保存されます</span>
-      <button class="btn sm" id="resetProject">新しく始める</button>
+    <div id="projectRow">
+      <div class="divider"></div>
+      <div class="row">
+        <span class="hint" style="flex:1">保存状態は画面上部で確認できます</span>
+        <button class="btn sm" id="retrySaveBtn">再試行</button>
+        <button class="btn sm" id="resetProject">新しく始める</button>
+      </div>
     </div>
   </div>
 
   <div class="panel" id="panel-color">
-    <label class="chk"><input type="checkbox" id="autoAlignChk" checked> 自動そろえ（室内・屋外の差を均す）</label>
-    <div class="divider"></div>
-    <div class="chips" id="lutChips">
-      <button class="chip" data-lut="mine" style="display:none">自分の色</button>
-      <button class="chip" data-lut="airu" style="display:none">アイル</button>
-      <button class="chip" data-lut="film8" style="display:none">8mm</button>
-      <button class="chip on" data-lut="hikari">ひかり</button>
-      <button class="chip" data-lut="none">なし</button>
-      <button class="chip" data-lut="file">＋ 自分のLUT (.cube)</button>
+    <button class="chip" id="presetToggle" aria-expanded="false">完成イメージ ▾<b></b></button>
+<div class="cardRow" id="lookPresets" hidden>
+      <button class="card" data-preset="diary"><span class="th th-diary"></span><span class="nm">自分の色</span></button>
+      <button class="card" data-preset="mv"><span class="th th-mv"></span><span class="nm">青い記憶</span></button>
+      <button class="card" data-preset="film8"><span class="th th-film8"></span><span class="nm">8mmホーム</span></button>
     </div>
-    <div class="chips" id="fxChips" style="margin-top:10px">
-      <button class="chip on" data-fx="0">質感なし</button>
-      <button class="chip" data-fx="1">アイル（滲み）</button>
-      <button class="chip" data-fx="2">8mmフィルム強め</button>
+
+    <div class="toolRow" id="colorTools">
+      <button class="tool" data-tool="lut"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="8.5" cy="10" r="1.3" fill="currentColor" stroke="none"/><circle cx="14.5" cy="8" r="1.3" fill="currentColor" stroke="none"/><circle cx="15.2" cy="14" r="1.3" fill="currentColor" stroke="none"/><path d="M12 21c-2 0-2.5-2-1-3s4-.5 4 1-1 2-3 2z"/></svg><span>色</span></button>
+      <button class="tool" data-tool="fx"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg><span>質感</span></button>
+      <button class="tool" data-tool="motion"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2.5-6 3.5 12 2.5-6h6.5"/></svg><span>動き</span></button>
+      <button class="tool" data-tool="hsl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="10" r="5"/><circle cx="15" cy="10" r="5"/><circle cx="12" cy="15.5" r="5"/></svg><span>HSL</span></button>
+      <button class="tool" data-tool="curve"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" opacity=".35"/><path d="M4 20 C 9 19, 10 13, 12 12 S 19 6, 20 4"/></svg><span>カーブ</span></button>
+      <button class="tool" data-tool="adjust"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10M18 8h2M4 16h2M10 16h10"/><circle cx="16" cy="8" r="2"/><circle cx="7" cy="16" r="2"/></svg><span>調整</span></button>
+      <button class="tool" data-tool="align"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16M5 20h14"/><path d="M12 7l-5 7h10z"/><path d="M4 11h4M16 11h4"/></svg><span>そろえ</span></button>
     </div>
-    <p class="hint">色と質感は全クリップに一括で当たります。</p>
-    <div class="row"><label>強さ</label><input type="range" id="uStrength" min="0" max="100" value="85"><output>85</output></div>
-    <div class="row"><label>露出</label><input type="range" id="uExposure" min="-100" max="100" value="0"><output>0</output></div>
-    <div class="row"><label>コントラスト</label><input type="range" id="uContrast" min="-100" max="100" value="0"><output>0</output></div>
-    <div class="row"><label>彩度</label><input type="range" id="uSaturation" min="-100" max="100" value="0"><output>0</output></div>
-    <div class="row"><label>フェード</label><input type="range" id="uFade" min="0" max="100" value="0"><output>0</output></div>
-    <div class="row"><label>滲み</label><input type="range" id="uGlow" min="0" max="200" value="100"><output>100</output></div>
-    <div class="row"><label>ハレーション</label><input type="range" id="uHal" min="0" max="60" value="0"><output>0</output></div>
-    <div class="row"><label>粒子の量</label><input type="range" id="uGrain" min="0" max="100" value="12"><output>12</output></div>
-    <div class="row"><label>粒子の大きさ</label><input type="range" id="uGrainSize" min="50" max="400" value="100"><output>100</output></div>
-    <div class="row"><label>レターボックス</label><input type="checkbox" id="uLetterbox" checked style="width:18px;height:18px;accent-color:var(--acc)"></div>
+
+    <div class="work" id="work-lut">
+      <p class="rowLbl">色（全クリップに一括）</p>
+<div class="chipRow" id="lutChips">
+        <button class="chip" data-lut="mine" style="display:none">自分の色</button>
+        <button class="chip" data-lut="airu" style="display:none">青い記憶</button>
+        <button class="chip" data-lut="film8" style="display:none">8mm</button>
+        <button class="chip on" data-lut="hikari">ひかり</button>
+        <button class="chip" data-lut="none">なし</button>
+        <button class="chip" data-lut="file">＋ 自分のLUT</button>
+      </div>
+    </div>
+
+    <div class="work" id="work-fx" hidden>
+<div class="chipRow" id="fxChips">
+        <button class="chip on" data-fx="0">質感なし</button>
+        <button class="chip" data-fx="1">青い記憶（滲み）</button>
+        <button class="chip" data-fx="2">8mmホームムービー</button>
+      </div>
+<div class="chipRow" id="fxParams">
+        <button class="chip" data-slider="uGlow">滲み<b></b></button>
+        <button class="chip" data-slider="uHal">ハレーション<b></b></button>
+        <button class="chip" data-slider="uGrain">粒子の量<b></b></button>
+        <button class="chip" data-slider="uGrainSize">粒子の大きさ<b></b></button>
+        <span id="filmDetail" hidden>
+          <button class="chip" data-slider="uDamage">経年の跡<b></b></button>
+          <button class="chip" data-slider="filmProfileSel">8mmの種類<b></b></button>
+        </span>
+      </div>
+    </div>
+
+    <div class="work" id="work-motion" hidden>
+      <!-- 全部おなじ形（枠＋トグル）。カード本体を押すと下に、その項目だけの調整が出る -->
+      <div class="fxCards" id="motionCards">
+        <div class="fxcard" data-motion="handheld"><button class="body"><span class="nm">手ブレ</span><span class="ds">手持ちのゆれ</span></button><button class="tg" aria-label="手ブレの入切"><i></i></button></div>
+        <div class="fxcard" data-motion="leak"><button class="body"><span class="nm">感光</span><span class="ds">端からの光漏れ</span></button><button class="tg" aria-label="感光の入切"><i></i></button></div>
+        <div class="fxcard" data-motion="trans"><button class="body"><span class="nm">つなぎ</span><span class="ds">カットの光・焼け</span></button><button class="tg" aria-label="つなぎの入切"><i></i></button></div>
+        <div class="fxcard" data-motion="judder"><button class="body"><span class="nm">コマ落ち</span><span class="ds">フィルムのカクつき</span></button><button class="tg" aria-label="コマ落ちの入切"><i></i></button></div>
+        <div class="fxcard" data-motion="vig"><button class="body"><span class="nm">周辺減光</span><span class="ds">四すみの落ち</span></button><button class="tg" aria-label="周辺減光の入切"><i></i></button></div>
+        <div class="fxcard" data-motion="endDur"><button class="body"><span class="nm">おわり</span><span class="ds">最後の余韻</span></button><button class="tg" aria-label="おわりの入切"><i></i></button></div>
+      </div>
+      <!-- 選んだ項目の道具だけを出す。つなぎの一括操作はつなぎの中へ、色はおわりの中へ -->
+      <div class="actRow2" id="transBulk" hidden>
+        <button class="btn sm" id="transAll">全部の境目に</button>
+        <button class="btn sm" id="transNone">全部はずす</button>
+        <button class="btn sm" id="reseed">引き直し</button>
+      </div>
+      <div class="actRow2" id="endColorRow" hidden>
+        <button class="btn sm on" id="endWhite">白でおわる</button>
+        <button class="btn sm" id="endBlack">黒でおわる</button>
+      </div>
+    </div>
+
+    <div class="work" id="work-hsl" hidden>
+      <div class="workHead"><span class="rowLbl" id="hslTargetLabel">HSL</span>
+        <button class="btn sm" id="hslResetCh">この色を戻す</button></div>
+      <div class="chan" id="hslChannels"></div>
+      <div class="row"><label id="hslLabelH">色相</label><input type="range" id="hslH" min="-100" max="100" value="0"><output>0</output></div>
+      <div class="row"><label>彩度</label><input type="range" id="hslS" min="-100" max="100" value="0"><output>0</output></div>
+      <div class="row"><label>明るさ</label><input type="range" id="hslL" min="-100" max="100" value="0"><output>0</output></div>
+    </div>
+
+    <div class="work" id="work-curve" hidden>
+      <div class="workHead"><span class="rowLbl" id="curveTargetLabel">カーブ</span>
+        <button class="btn sm" id="curveReset">まっすぐに戻す</button></div>
+      <div id="curveWrap"><svg id="curveSvg" viewBox="0 0 300 230"></svg></div>
+    </div>
+
+    <div class="work" id="work-adjust" hidden>
+      <p class="rowLbl">明るさ・色みの微調整</p>
+      <div class="chipRow" id="adjustChips">
+        <button class="chip" data-slider="uExposure">露出<b></b></button>
+        <button class="chip" data-slider="uContrast">コントラスト<b></b></button>
+        <button class="chip" data-slider="uSaturation">彩度<b></b></button>
+        <button class="chip" data-slider="uFade">フェード<b></b></button>
+      </div>
+    </div>
+
+    <div class="work" id="work-align" hidden>
+      <label class="sw"><span>自動そろえ（室内・屋外の差を均す）</span><input type="checkbox" id="autoAlignChk" checked><i></i></label>
+      <p class="hint" id="alignReadout"></p>
+      <label class="sw"><span>レターボックス（上下の黒帯）</span><input type="checkbox" id="uLetterbox" checked><i></i></label>
+    </div>
+
+<div id="sliderHost">
+      <div class="row"><label>強さ</label><input type="range" id="uStrength" min="0" max="100" value="85"><output>85</output></div>
+      <div class="row"><label>露出</label><input type="range" id="uExposure" min="-100" max="100" value="0"><output>0</output></div>
+      <div class="row"><label>コントラスト</label><input type="range" id="uContrast" min="-100" max="100" value="0"><output>0</output></div>
+      <div class="row"><label>彩度</label><input type="range" id="uSaturation" min="-100" max="100" value="0"><output>0</output></div>
+      <div class="row"><label>フェード</label><input type="range" id="uFade" min="0" max="100" value="0"><output>0</output></div>
+      <div class="row"><label>滲み</label><input type="range" id="uGlow" min="0" max="200" value="100"><output>100</output></div>
+      <div class="row"><label>手ブレ</label><input type="range" id="uHandheld" min="0" max="100" value="0"><output>0</output></div>
+      <div class="row"><label>感光</label><input type="range" id="uLeak" min="0" max="100" value="0"><output>0</output></div>
+      <div class="row"><label>つなぎ</label><input type="range" id="uTrans" min="0" max="100" value="0"><output>0</output></div>
+      <div class="row"><label>コマ落ち</label><input type="range" id="uJudder" min="0" max="100" value="0"><output>0</output></div>
+      <!-- 100=実測どおり（参照アイルの四すみ0.835）。300まで上げられるようにして、好みで強められる -->
+      <div class="row"><label>周辺減光</label><input type="range" id="uVig" min="0" max="500" value="300"><output>300</output></div>
+      <div class="row"><label>おわり</label><input type="range" id="uEndDur" min="0" max="50" value="15"><output>1.5秒</output></div>
+      <div class="row"><label>ハレーション</label><input type="range" id="uHal" min="0" max="60" value="0"><output>0</output></div>
+      <div class="row"><label>粒子の量</label><input type="range" id="uGrain" min="0" max="100" value="12"><output>12</output></div>
+      <div class="row"><label>粒子の大きさ</label><input type="range" id="uGrainSize" min="50" max="400" value="100"><output>100</output></div>
+      <div class="row"><label for="uDamage">経年の跡</label><input type="range" id="uDamage" min="0" max="100" value="8"><output>8</output></div>
+      <div class="row" id="rowFilmProfile"><label for="filmProfileSel">種類</label>
+        <select id="filmProfileSel">
+          <option value="home8">8mmホームムービー</option>
+          <option value="super8_reversal">Super8 リバーサル</option>
+          <option value="super8_negative">Super8 モダンネガ</option>
+        </select>
+      </div>
+      <p class="hint" id="filmProfileHint"></p>
+    </div>
+  </div>
+
+  <div class="panel" id="panel-text">
+    <div class="actRow2">
+      <button class="btn" id="addTextBtn">＋ 文字を追加</button>
+      <button class="btn" id="dateStampBtn">＋ 日付スタンプ</button>
+    </div>
+    <p class="rowLbl" id="textListLabel" hidden>入れた文字（押して編集）</p>
+    <div class="cardRow" id="textList"></div>
+
+    <div id="textEdit" hidden>
+      <div class="toolRow" id="textTools">
+      <button class="tool on" data-ttool="content"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16"/><path d="M14.5 4.5l4 4L8 19l-4.5.5L4 15z"/></svg><span>内容</span></button>
+      <button class="tool" data-ttool="font"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19l6-14 6 14M6.5 14h7"/><path d="M17 19c1.5 0 3-1 3-3s-1.5-3-3-3-3 1-3 3"/></svg><span>書体</span></button>
+      <button class="tool" data-ttool="color"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="8.5" cy="10" r="1.3" fill="currentColor" stroke="none"/><circle cx="14.5" cy="8" r="1.3" fill="currentColor" stroke="none"/><circle cx="15.2" cy="14" r="1.3" fill="currentColor" stroke="none"/></svg><span>色</span></button>
+      <button class="tool" data-ttool="size"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18l5-12 5 12M5.5 14h7"/><path d="M18 8v8M15 11l3-3 3 3"/></svg><span>大きさ</span></button>
+      <button class="tool" data-ttool="pos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/><path d="M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/></svg><span>位置</span></button>
+      <button class="tool" data-ttool="time"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg><span>時間</span></button>
+      <button class="tool" data-ttool="deco"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.2 5.6L20 10l-4.4 3.6L17 20l-5-3-5 3 1.4-6.4L4 10l5.8-1.4z"/></svg><span>飾り</span></button>
+      <button class="tool" data-ttool="del"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></svg><span>削除</span></button>
+      </div>
+
+      <div class="work" id="twork-content">
+        <div class="row"><label>いまの文字</label><span class="hint" id="textPreviewLine" style="flex:1"></span>
+          <button class="btn sm" id="editTextBtn">打ち直す</button></div>
+        <p class="hint">プレビューの文字をタップしても打ち直せます。指で動かす・下のつまみ（↻）で回すこともできます。</p>
+      </div>
+      <div class="work" id="twork-font" hidden><div class="cardRow" id="textFonts"></div></div>
+      <div class="work" id="twork-color" hidden><div class="chan" id="textColors"></div></div>
+      <div class="work" id="twork-size" hidden></div>
+      <div class="work" id="twork-pos" hidden></div>
+      <div class="work" id="twork-time" hidden><p class="hint" id="textAnchorHint"></p></div>
+      <div class="work" id="twork-deco" hidden>
+        <label class="sw"><span>焼き込み</span><input type="checkbox" id="txBurnIn" checked><i></i></label>
+        <label class="sw"><span>縁取り</span><input type="checkbox" id="txStroke"><i></i></label>
+        <label class="sw"><span>座布団</span><input type="checkbox" id="txPlate"><i></i></label>
+      </div>
+      <div class="work" id="twork-del" hidden>
+        <p class="hint">この文字を消します（あとで戻せます）</p>
+        <button class="btn" id="delTextBtn" style="color:#e07a6a; border-color:#5a3a36">削除する</button>
+      </div>
+
+      <button class="btn sm" id="swapSliderBtn" hidden style="margin:2px 0">もう一方へ</button>
+      <div id="textSliderHost">
+        <div class="row"><label>大きさ</label><input type="range" id="txSize" min="35" max="250" value="80"><output>80</output></div>
+        <div class="row"><label>よこ位置</label><input type="range" id="txX" min="0" max="100" value="50"><output>50</output></div>
+        <div class="row"><label>たて位置</label><input type="range" id="txY" min="0" max="100" value="22"><output>22</output></div>
+        <div class="row"><label>はじまり</label><input type="range" id="txStart" min="0" max="100" value="0"><output>0</output></div>
+        <div class="row"><label>長さ</label><input type="range" id="txDur" min="2" max="100" value="20"><output>20</output></div>
+      </div>
+    </div>
+    <p class="hint" id="textHint">クリップを選んでから追加すると、そのクリップに貼りつきます。</p>
   </div>
 
   <div class="panel" id="panel-music">
@@ -244,18 +757,27 @@
       <span class="hint" id="musicName">未選択</span>
     </div>
     <div class="row"><label>音量</label><input type="range" id="musicVol" min="0" max="100" value="70"><output>70</output></div>
-    <p class="hint">曲は自動でフェードイン・アウトし、作品の長さで切れます。</p>
+    <!-- 曲のどこから鳴らすか。波形で探して、スライダーで詰める（役割を分ける） -->
+    <div id="musicWaveWrap" hidden>
+      <canvas id="musicWave"></canvas>
+    </div>
+    <!-- ラベルは「曲の位置」。「曲のどこから」は2行に折れて収まりが悪かった -->
+    <div class="row" id="musicOffsetRow" hidden><label>曲の位置</label><input type="range" id="musicOffset" min="0" max="100" value="0"><output>0:00</output></div>
+    <label class="chk"><input type="checkbox" id="musicLoopChk" checked> 曲が短いときはくり返す</label>
+    <p class="hint" id="musicLenHint">曲は自動でフェードイン・アウトします。</p>
   </div>
 
   <div class="panel" id="panel-export">
     <div class="row">
       <label>解像度</label>
-      <select id="resSel"><option value="1080">1080p</option><option value="2160">4K</option></select>
+      <select id="resSel"><option value="1080">1080p</option></select>
       <span style="flex:1"></span>
       <button class="btn primary" id="runExport">書き出す</button>
     </div>
     <div id="progBar"><div id="progFill"></div></div>
     <div id="exportProg"></div>
+    <div id="exportSummary"></div>
+    <div id="exportWarnings" aria-live="polite"></div>
     <video id="outVideo" controls playsinline></video>
     <div class="row" id="saveRow" style="display:none">
       <a class="btn" id="dlLink" download="ひかりを編む.mp4">保存</a>
@@ -263,32 +785,85 @@
     </div>
   </div>
 
-  <nav>
-    <button data-tab="clips"><span class="ic">🎞</span>クリップ</button>
-    <button data-tab="color"><span class="ic">🎨</span>色</button>
-    <button data-tab="music"><span class="ic">🎵</span>音楽</button>
-    <button data-tab="export"><span class="ic">↑</span>書き出し</button>
+  <nav id="mainNav">
+    <button data-tab="clips"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 12h4M17 12h4"/></svg>クリップ</button>
+    <button data-tab="color"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="8.5" cy="10" r="1.3" fill="currentColor"/><circle cx="14.5" cy="8" r="1.3" fill="currentColor"/><circle cx="15.2" cy="14" r="1.3" fill="currentColor"/></svg>見た目</button>
+    <button data-tab="text"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 6h14M12 6v13"/></svg>文字</button>
+    <button data-tab="music"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></svg>音楽</button>
+    <button data-tab="export"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 19V5M6 11l6-6 6 6"/></svg>書き出し</button>
   </nav>
+  <div id="transPicker">
+    <div class="pickCard">
+      <p class="title">このつなぎ目</p>
+      <button class="btn" data-kind="auto">自動（毎回ちがう）</button>
+      <button class="btn" data-kind="flash">✦ 光</button>
+      <button class="btn" data-kind="burn">▲ 焼け</button>
+      <!-- 8mmの焼けは青い記憶側でも選べる。8mmでは上の「▲ 焼け」が同じものなので出さない -->
+      <button class="btn" data-kind="scorch" data-only="mv">▲ 8mmの焼け</button>
+      <button class="btn" data-kind="black" data-only="film">● 黒コマ</button>
+      <!-- 作品の最後の境目でだけ出す -->
+      <button class="btn" data-kind="fadeout" data-only="last">◐ 暗転して終わる</button>
+      <button class="btn" data-kind="none">そのまま切る</button>
+      <div class="row"><label>この光の強さ</label><input type="range" id="transAmp" min="30" max="160" value="100"><output>100</output></div>
+      <button class="btn" id="transRoll">この境目だけ引き直す</button>
+    </div>
+  </div>
 
   <pre id="log"></pre>
 </div>
 
 <div id="presetSheet">
   <div id="presetSheetCard">
-    <h2>どちらで始めますか？</h2>
+    <h2>どんな作品にしますか？</h2>
     <button class="presetCard" id="presetDiary">
       <span class="pic">📔</span>
-      <span><p class="pn">日記</p><p class="pd">毎日をさっと残す。たて型・自分の色・そのままの音・3秒クリップ</p></span>
+      <span><p class="pn">自分の色</p><p class="pd">日々の光を、そのまま作品に。たて型・原音・3秒クリップ</p></span>
     </button>
     <button class="presetCard" id="presetMv">
       <span class="pic">🎬</span>
-      <span><p class="pn">MV</p><p class="pd">作品として仕上げてSNSへ。よこ型・アイルの質感・音楽・2秒クリップ</p></span>
+      <span><p class="pn">青い記憶</p><p class="pd">青い滲みと静かな間でつくる。よこ型・音楽・2秒クリップ</p></span>
+    </button>
+    <button class="presetCard" id="presetFilm8">
+      <span class="pic">🎞</span>
+      <span><p class="pn">8mmホームムービー</p><p class="pd">16fpsの記憶の手触り。4:3・音楽・3秒クリップ</p></span>
     </button>
     <button id="presetContinue">今のプロジェクトを続ける</button>
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.3/dist/mp4box.all.min.js" crossorigin="anonymous"></script>
-<script type="module" src="./app.js"></script>
+<div id="projectSheet" role="dialog" aria-modal="true" aria-label="作品一覧">
+  <div id="projectSheetCard">
+    <div class="row"><strong style="flex:1">作品</strong><button class="btn sm" id="closeProjectSheet">閉じる</button></div>
+    <div id="projectList"></div>
+    <div id="projectStorageInfo" aria-live="polite"></div>
+    <div id="projectActionStatus" aria-live="polite"></div>
+    <div class="row" id="renameRow" hidden>
+      <label for="renameInput">作品名</label><input id="renameInput" type="text" maxlength="80" autocomplete="off">
+      <button class="btn" id="saveRenameBtn" type="button">保存</button><button class="btn" id="cancelRenameBtn" type="button">取消</button>
+    </div>
+    <div class="projectActions">
+      <button class="btn" id="newProjectBtn">新しい作品</button><button class="btn" id="renameProjectBtn">名前変更</button>
+      <button class="btn" id="duplicateProjectBtn">複製</button><button class="btn" id="exportProjectBtn">バックアップ</button>
+      <button class="btn" id="importProjectBtn">読み込む</button><button class="btn" id="clearProjectBtn">内容を空にする</button>
+      <button class="btn danger" id="deleteProjectBtn" style="grid-column:1/-1">作品を削除</button>
+    </div>
+    <a id="backupLink" hidden download>バックアップを保存</a>
+    <input id="projectFileInput" type="file" accept=".hikari,application/octet-stream" hidden>
+  </div>
+</div>
+
+<!-- 文字用の書体（すべてSIL OFL・商用可）。同梱版＝外の配信に頼らない。
+     ひらがな・カタカナ・英数記号と、よく使う漢字2310字だけを残してある（1書体300〜700KB）。
+     作り直す手順は 書体作成/書体を作り直す.sh -->
+<style>
+@font-face { font-family:'Noto Sans JP';    src:url('./fonts/sans.woff2')   format('woff2'); font-weight:500; font-display:swap; }
+@font-face { font-family:'Shippori Mincho'; src:url('./fonts/serif.woff2')  format('woff2'); font-weight:500; font-display:swap; }
+@font-face { font-family:'Klee One';        src:url('./fonts/pen.woff2')    format('woff2'); font-weight:600; font-display:swap; }
+@font-face { font-family:'Zen Kurenaido';   src:url('./fonts/pencil.woff2') format('woff2'); font-weight:400; font-display:swap; }
+@font-face { font-family:'Yomogi';          src:url('./fonts/round.woff2')  format('woff2'); font-weight:400; font-display:swap; }
+@font-face { font-family:'Yusei Magic';     src:url('./fonts/marker.woff2') format('woff2'); font-weight:400; font-display:swap; }
+</style>
+<script src="./vendor/mp4box.all.min.js"></script>
+<script type="module" src="./app.js?v=2026-08-22c"></script>
 </body>
 </html>
