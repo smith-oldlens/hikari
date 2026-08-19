@@ -66,7 +66,7 @@ function seekTo(video, t, fast) {
 // ===== 状態 =====
 // 実機検証の生命線。画面の版数と一致しないJSが動いていたら、それはキャッシュ・生き残ったタブの仕業。
 // 「押せない」系の報告が来たら、直す前にまずこの表示を確認してもらう（2026-08-15の教訓）
-const APP_VERSION = '2026-08-22d';
+const APP_VERSION = '2026-08-23a';
 // 作品の保存の形。**1 の時代に無かったもの**＝文字・つなぎの手動指定・おわり・音楽の位置とループ。
 // 形そのものは 1 のまま読めるが、**意味が変わった項目**（周辺減光）があるので、
 // どちらの時代に保存されたのかを見分けられるようにした。
@@ -5438,6 +5438,10 @@ $('musicBtn').onclick = () => $('musicFileInput').click();
 $('musicFileInput').onchange = async e => {
   const f = e.target.files[0];
   if (!f) return;
+  await 音楽を入れる(f);
+  e.target.value = '';
+};
+async function 音楽を入れる(f) {
   const ab = await f.arrayBuffer();
   const before = beginHistory();
   project.music = { name: f.name, assetId: newId(), arrayBuffer: ab, volume: parseFloat($('musicVol').value) / 100 };
@@ -5449,8 +5453,7 @@ $('musicFileInput').onchange = async e => {
   renderTimeline();
   scheduleSave();
   commitHistory(before);
-  e.target.value = '';
-};
+}
 $('musicVol').oninput = () => {
   $('musicVol').parentElement.querySelector('output').textContent = $('musicVol').value;
   if (project.music) project.music.volume = parseFloat($('musicVol').value) / 100;
@@ -5532,8 +5535,37 @@ function syncClipChips() {
   set('clipFxScale', `${Math.round(clipFxScaleOf(c) * 100)}%`);
   set('clipHighKey', `${Math.round(clipHighKeyOf(c) * 100)}%`);
   set('clipFit', c.fit === 'cover' ? 'いっぱい' : c.fit === 'contain' ? '切れない' : '作品と同じ');
+  set('clipStart', c.kind === 'photo' ? '—' : c.start.toFixed(1) + '秒');
+  // 写真は「素材のどこを使うか」が無いので、この道具は出さない
+  const startChip = document.querySelector('#clipChips [data-slider=clipStart]');
+  if (startChip) startChip.hidden = c.kind === 'photo';
+  const sl = $('clipStart');
+  if (sl && c.kind === 'video') {
+    const 尺 = clipLen(c), 余り = Math.max(0, c.dur - 尺);
+    sl.max = String(Math.round(余り * 10));            // 0.1秒きざみ
+    sl.value = String(Math.round(c.start * 10));
+    sl.disabled = 余り < 0.05;                          // 素材ぜんぶを使っているならずらせない
+    const out = sl.parentElement.querySelector('output');
+    if (out) out.textContent = sl.disabled ? 'ずらせません' : c.start.toFixed(1) + '秒';
+  }
   document.querySelectorAll('#clipFit .btn').forEach(b => b.classList.toggle('on', (b.dataset.fit || '') === (c.fit || '')));
 }
+// 長さはそのままに、素材のどこを使うかをずらす（スリップ）。
+// 【2026-08-17 ユーザー要望】「クリップが長さを変えることしかできないため、切り取る位置をかえられるように」。
+// タイムラインの左右のつまみは**長さが変わってしまう**ので、長さを保つ道具を別に置いた。
+$('clipStart').oninput = () => {
+  const c = selClip(); if (!c || c.kind !== 'video') return;
+  const 尺 = clipLen(c);
+  const s = clamp(parseFloat($('clipStart').value) / 10, 0, Math.max(0, c.dur - 尺));
+  c.start = s; c.end = Math.min(c.dur, s + 尺);
+  const out = $('clipStart').parentElement.querySelector('output');
+  if (out) out.textContent = s.toFixed(1) + '秒';
+  const chip = document.querySelector('#clipChips [data-slider=clipStart] b');
+  if (chip) chip.textContent = s.toFixed(1) + '秒';
+  renderTimeline();
+  requestSeek2(c, c.start);      // ずらした先が見えるように、その頭を出す
+  markDirty();
+};
 // このクリップだけの収め方。空＝作品ぜんぶの設定に従う
 $('clipFit').addEventListener('click', e => {
   const b = e.target.closest('.btn'); if (!b) return;
@@ -6723,5 +6755,41 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
         idle(温める, { timeout: 10000 });
       })
       .catch(e => diag('オフライン準備できず', () => ({ 理由: String(e && e.message || e) })));
+  });
+}
+
+// ===== 素材をドラッグして落として入れる（PCで使うとき）=====
+// 【2026-08-17 ユーザー要望】「PC操作のとき、ドラッグアンドドロップで動画、音楽素材を追加できるように」
+// 落とされたものは中身で振り分ける：動画と写真は素材へ、音は音楽へ。
+// 迷わせないよう、画面の上に「ここに落とす」と出す（落とせる状態が見えないと不安になる）。
+{
+  let 深さ = 0;                       // 子要素をまたぐと dragleave が飛ぶので、出入りを数える
+  const 幕 = () => $('dropVeil');
+  const 見せる = on => { const v = 幕(); if (v) v.classList.toggle('on', on); };
+  const 効く = e => [...(e.dataTransfer?.types || [])].includes('Files');
+
+  window.addEventListener('dragenter', e => {
+    if (!効く(e) || exporting || operationBusy) return;
+    e.preventDefault(); 深さ++; 見せる(true);
+  });
+  window.addEventListener('dragover', e => { if (効く(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+  window.addEventListener('dragleave', e => { if (!効く(e)) return; 深さ = Math.max(0, 深さ - 1); if (!深さ) 見せる(false); });
+  window.addEventListener('drop', async e => {
+    if (!効く(e)) return;
+    e.preventDefault(); 深さ = 0; 見せる(false);
+    if (exporting || operationBusy) { setProjectStatus('いま処理中です。終わってからもう一度落としてください'); return; }
+    const files = [...(e.dataTransfer.files || [])];
+    if (!files.length) return;
+    const 動画 = files.filter(f => f.type.startsWith('video/'));
+    const 写真 = files.filter(f => f.type.startsWith('image/'));
+    const 音 = files.filter(f => f.type.startsWith('audio/'));
+    const 不明 = files.filter(f => !/^(video|image|audio)\//.test(f.type));
+    diag('落とされた', () => ({ 動画: 動画.length, 写真: 写真.length, 音: 音.length, 不明: 不明.length }));
+    if (動画.length) await addFiles(動画, 'video');
+    if (写真.length) await addFiles(写真, 'photo');
+    if (音.length) await 音楽を入れる(音[0]);          // 音楽は1曲だけ持てる
+    const 入れた = [動画.length && `動画${動画.length}本`, 写真.length && `写真${写真.length}枚`, 音.length && '音楽'].filter(Boolean);
+    if (入れた.length) setProjectStatus(入れた.join('と') + 'を入れました');
+    else setProjectStatus('動画・写真・音楽のファイルを落としてください');
   });
 }

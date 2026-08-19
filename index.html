@@ -48,6 +48,13 @@
   #snapGuideX { width:1px; }
   #snapGuideY { height:1px; }
   .snapGuide.on { display:block; }
+  /* PCで素材を落とすときの案内。落とせる状態が見えないと不安になるので、画面ごと覆って伝える */
+  #dropVeil { position:fixed; inset:0; z-index:90; display:none; align-items:center; justify-content:center;
+    background:rgba(10,10,12,.72); pointer-events:none; }
+  #dropVeil.on { display:flex; }
+  #dropVeil > div { border:2px dashed var(--acc); border-radius:16px; padding:28px 36px; text-align:center;
+    color:var(--fg); font-size:15px; line-height:1.9; background:rgba(21,21,26,.94); }
+  #dropVeil b { display:block; font-size:18px; margin-bottom:6px; }
   #beforeBadge { position:absolute; top:8px; left:8px; font-size:10px; padding:3px 9px; border-radius:6px;
     background:rgba(216,160,91,.22); border:1px solid var(--acc); color:var(--acc); pointer-events:none; }
   #previewCanvas { display:block; max-width:100%; max-height:100%; }
@@ -523,6 +530,7 @@
             <button class="chip" data-slider="clipTemp">色温度<b></b></button>
             <button class="chip" data-slider="clipFxScale">質感の強さ<b></b></button>
             <button class="chip" data-slider="clipHighKey">ハイキー<b></b></button>
+            <button class="chip" data-slider="clipStart">切り出し位置<b></b></button>
             <button class="chip" data-slider="clipFit">収め方<b></b></button>
           </div>
           <div id="clipSliderHost">
@@ -530,6 +538,9 @@
             <div class="row"><label>色温度補正</label><input type="range" id="clipTemp" min="-100" max="100" value="0"><output>0</output></div>
             <div class="row"><label>質感の強さ</label><input type="range" id="clipFxScale" min="0" max="100" value="100"><output>100</output></div>
             <div class="row"><label>ハイキー（白く飛ばす）</label><input type="range" id="clipHighKey" min="0" max="100" value="0"><output>0</output></div>
+            <!-- 長さはそのままに、素材のどこを使うかだけをずらす（動画編集でいうスリップ）。
+                 「頭から5秒」で取り込んだあと、いいところが後半にあったときに使う -->
+            <div class="row"><label>切り出し位置</label><input type="range" id="clipStart" min="0" max="100" value="0"><output>0.0秒</output></div>
             <!-- このクリップだけの収め方。よこの作品にたての1本が混ざったとき、そこだけ帯を消せる -->
             <div class="row"><label>収め方</label>
               <span id="clipFit" class="segRow">
@@ -748,6 +759,8 @@
     <p class="hint" id="textHint">クリップを選んでから追加すると、そのクリップに貼りつきます。</p>
   </div>
 
+  <div id="dropVeil"><div><b>ここに落としてください</b>動画・写真は素材に、音楽は曲として入ります</div></div>
+
   <div class="panel" id="panel-music">
     <label class="chk"><input type="checkbox" id="muteAllChk"> 元の音を消して、音楽だけにする</label>
     <p class="hint">オフなら元の音をそのまま書き出します（既定）。</p>
@@ -864,6 +877,6 @@
 @font-face { font-family:'Yusei Magic';     src:url('./fonts/marker.woff2') format('woff2'); font-weight:400; font-display:swap; }
 </style>
 <script src="./vendor/mp4box.all.min.js"></script>
-<script type="module" src="./app.js?v=2026-08-22d"></script>
+<script type="module" src="./app.js?v=2026-08-23a"></script>
 </body>
 </html>
