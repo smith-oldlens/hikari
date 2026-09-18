@@ -9,7 +9,7 @@
 // 本体をネット優先にしているのは、**開発中に古いJSを掴ませないため**。
 // 版ずれは実機検証の生命線なので、ここだけは新しさを取る（2026-08-15の教訓）。
 
-const CACHE = 'hikari-v1';
+const CACHE = 'hikari-v2026-09-19b';
 
 const 不変か = url =>
   /\/fonts\/|\/vendor\/|\.cube$/.test(url.pathname);

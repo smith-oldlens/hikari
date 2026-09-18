@@ -66,7 +66,7 @@ function seekTo(video, t, fast) {
 // ===== 状態 =====
 // 実機検証の生命線。画面の版数と一致しないJSが動いていたら、それはキャッシュ・生き残ったタブの仕業。
 // 「押せない」系の報告が来たら、直す前にまずこの表示を確認してもらう（2026-08-15の教訓）
-const APP_VERSION = '2026-08-23a';
+const APP_VERSION = '2026-09-19b';
 // 作品の保存の形。**1 の時代に無かったもの**＝文字・つなぎの手動指定・おわり・音楽の位置とループ。
 // 形そのものは 1 のまま読めるが、**意味が変わった項目**（周辺減光）があるので、
 // どちらの時代に保存されたのかを見分けられるようにした。
@@ -95,6 +95,14 @@ const PROJECT_FORMAT = 2;
   };
   setTimeout(checkStale, 3000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkStale(); });
+}
+// 版の表示は旧ヘッダーにしか無く、SCREEN 03 と現像画面（ヘッダー非表示）では見えなかった。
+// 元の #appVer を正として、.appVerMirror へ文字と stale 状態を写す（版の判定ロジックは1か所のまま）
+{
+  const src = () => document.getElementById('appVer');
+  const sync = () => { const s = src(); if (!s) return; document.querySelectorAll('.appVerMirror').forEach(m => { m.textContent = s.textContent; m.classList.toggle('stale', s.classList.contains('stale')); }); };
+  const start = () => { if (!src()) return; sync(); new MutationObserver(sync).observe(src(), { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['class'] }); };
+  document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', start) : start();
 }
 
 // 実機の「押しても遅い」を記録する。200ms超の長タスクと、pointerdownが処理されるまでの遅れ。
@@ -127,8 +135,17 @@ document.addEventListener('pointerdown', e => {
   }
 }
 
+const HAKUMEI_LIGHT_COMPARE_LEVEL = 0.45;
+// HKR-006 T4-A。通常作品には保存も適用もしない、比較専用の時間質感。
+// 弱／中は上限の半分／全量で、seedから決める1本の滑らかな波を作品時刻で読む。
+const HAKUMEI_FILM_BREATH_LEVELS = Object.freeze({ weak: 0.5, medium: 1 });
 const DEFAULT_ADJUST = Object.freeze({
   exposure: 0, contrast: 0, saturation: 0, fade: 0,
+  highlights: 0, shadows: 0, whites: 0, blacks: 0,
+  temperature: 0, tint: 0, vibrance: 0,
+  highlightHue: 45, highlightSat: 0, highlightAmount: 0,
+  shadowHue: 220, shadowSat: 0, shadowAmount: 0,
+  midtoneHue: 30, midtoneSat: 0, midtoneAmount: 0,
   grain: 0.12 / 4, grainSize: 1, glow: 1, halation: 0,
   letterbox: true, strength: 0.85, effect: 0, damage: 0,
   handheld: 0,          // 手ブレ（v5-4）。0=OFF。全エフェクトは既定0で、回帰18本を不変に保つ
@@ -146,8 +163,10 @@ const DEFAULT_ADJUST = Object.freeze({
 // 動き系を既定OFFにしていた当初の理由（回帰検査が壊れる）は、
 // 回帰測定側で動き系を0に固定するようにした時点で消えている（2026-08-15）。
 const MOTION_RECOMMEND = {
+  hakumei: { handheld: 0, leak: 0, trans: 0, judder: 0 },
   diary: { handheld: 0.35, leak: 0.25, trans: 0.40, judder: 0.45 },
   mv:    { handheld: 0.55, leak: 0.35, trans: 0.60, judder: 1.00 },  // アイル実測一式
+  mv2:   { handheld: 0.55, leak: 0.35, trans: 0.30, judder: 1.00 },  // 青い記憶v2（HKR-008）。つなぎ30＝白は境目の約16%（2026-09-18 ユーザー決定: 60だと多すぎ）
   film8: { handheld: 0.85, leak: 0.55, trans: 0.50, judder: 0 },     // Super8は18fps常時なのでコマ落ちは0
 };
 const MOTION_KEYS = ['handheld', 'leak', 'trans', 'judder'];
@@ -319,7 +338,7 @@ function curveToArray(v) {
 // 作品ごとに一度だけ作る質感の種。新規作品は必ず暗号学的乱数で始め、
 // 旧作品だけは端末間で同じ結果になるFNV-1a補完を使う。
 const DEFAULT_TEXTURE_SEED = 0x9e3779b9;
-const FILM_PROFILE_KEYS = Object.freeze(['home8', 'super8_reversal', 'super8_negative']);
+const FILM_PROFILE_KEYS = Object.freeze(['home8', 'super8_reversal', 'super8_negative', 'hakumei-v1', 'hakumei-v2']);
 function makeTextureSeed() {
   const word = new Uint32Array(1);
   if (!globalThis.crypto?.getRandomValues) throw new Error('この端末では作品の質感seedを作れません');
@@ -369,10 +388,13 @@ const project = {
   music: null,         // {name, arrayBuffer?|audioBuffer?, volume}
   muteAll: false,      // 元の音を消して音楽だけにする
   autoAlign: true,     // 自動そろえ
+  autoAmount: 1,       // 素材ごとのAuto補正へ掛ける共通量（0〜1）。既存作品は100%で読む
   impLen: 3,           // 取り込み長さ（秒。0=全部）
   preset: null,
+  posterTime: 0,
   textureSeed: null,
   filmProfile: 'home8',
+  hakumeiPlan: null,   // HKR-006: 再現可能な作品設計データ。採用済みLightだけ通常描画へ使う
 };
 let selId = null;
 let clipSeq = 0;
@@ -447,7 +469,7 @@ function textSpan(t, clipStarts) {
   return [s, clamp(Math.max(s + 0.2, t.anchor?.end ?? s + 2), 0, total)];
 }
 const MAX_PROJECT_SECONDS = 30;
-const PRESET_LABELS = { diary: '自分の色', mv: '青い記憶', film8: '8mmホームムービー' };
+const PRESET_LABELS = { hakumei: '薄明', diary: '自分の色', mv: '青い記憶', mv2: '青い記憶 v2', film8: '8mmホームムービー' };
 
 // 質感モード。数値は実測から決めている:
 //  ・アイルMV（全編解析）… 主役はブルーム＝ハイライトの滲み
@@ -494,19 +516,107 @@ const FILM_PROFILES = Object.freeze({
     stockContrast: -0.08, stockSaturation: -0.03, blackLift: 0.012, shoulder: 0.30,
     shadowTint: [-0.006, 0.004, 0.008], highlightTint: [0.006, 0.002, -0.002],
   }),
+  // 薄明v1。LABのliving_print候補をProductの独立profileとして移植する。
+  // Human見た目確認前の固定candidateであり、8mm由来の動き・傷・感光・周辺減光は持たない。
+  // threshold=0.62 は effect 2 からの暗黙継承にせず、このprofileの値として明示する。
+  'hakumei-v1': Object.freeze({
+    label: '薄明', fps: 0, threshold: 0.62, rolloff: 0, hardnessReduce: 0, bloom: 0.22, wide: 0.34,
+    weave: 0, jump: 0, flicker: 0, vignette: 0,
+    halo: [1.0, 1.0, 1.0], halation: 0, veil: 0, soften: 0, chroma: 0, dust: 0, scratch: 0,
+    grainCurve: 0, grain: 0, grainSize: 100, glow: 100, damage: 0, highlightCarry: 0.10,
+    stockContrast: -0.10, stockSaturation: -0.12, blackLift: 0.035, shoulder: 0.25,
+    shadowTint: [-0.004, 0.003, 0.010], highlightTint: [0.014, 0.007, -0.006],
+  }),
+  // 薄明v2。C2現状を通常描画へ昇格したprofile。粒子0.06・無彩色のにじみ0.09は
+  // HKR-006 T5-M3の比較を経て採用。既存作品の明示的な手動値は保存どおり尊重する。
+  'hakumei-v2': Object.freeze({
+    label: '薄明 v2', fps: 0, threshold: 0.62, rolloff: 0.35, hardnessReduce: 0.40, bloom: 0.22, wide: 0.34,
+    // カット別手ブレゲート（T6-D）。sliderZero: 手ブレスライダーが0のときだけ still／moving を使う
+    motionGate: Object.freeze({ mode: 'sliderZero', still: 0.25, moving: 0.10, threshold: 0.033 }),
+    // 境目の調和（T7・2026-09-16 採用 medium）
+    harmony: Object.freeze({ defaultLevel: 'medium' }),
+    weave: 0, jump: 0, flicker: 0, vignette: 0,
+    halo: [1.0, 1.0, 1.0], halation: 0.09, veil: 0, soften: 0, chroma: 0, dust: 0, scratch: 0,
+    grainCurve: 0, grain: 24, grainSize: 100, glow: 100, damage: 0, highlightCarry: 0.10,
+    stockContrast: -0.10, stockSaturation: -0.12, blackLift: 0.035, shoulder: 0.25,
+    shadowTint: [-0.004, 0.003, 0.010], highlightTint: [0.014, 0.007, -0.006],
+  }),
+  get 'aoi-v2'() { return AOI_V2_PROFILE; },
 });
+// 青い記憶 v2（HKR-008 段階0'・2026-09-16）。effect 1 の青い記憶（FX[1]＋MOTION_RECOMMEND.mv）をフィルム経路へ
+// 移した中立の土台。linearOptics 0・stock系0で、現行の青い記憶と同じ絵になることを検査してから育てる。
+// mvLook: 8mm由来の語彙（つなぎ・スプライス）を使わず、青い記憶の語彙のまま。grainHz: 粒子更新は従来の24Hz。
+const AOI_V2_PROFILE = Object.freeze({
+  // 5-3（2026-09-17 ユーザー採用 hold17）: 30fps基調にseedで約17%のコマを直前コマで保持（連続2まで）。実効約25fps。fps は cadenceHold が優先。
+  label: '青い記憶 v2', fps: 30, grainHz: 24, linearOptics: 0, mvLook: true,
+  // 2026-09-17 ユーザー採用 film24: 24fps基調＋散発保持（実効約20fps）。hold17（30fps基調）から更新。
+  cadenceHold: Object.freeze({ base: 24, rate: 0.17, max: 2 }),
+  // 5-4（2026-09-17 ユーザー採用 mid）: シャッターの残像＝同じクリップの連続フレームで直前フレームを35%混ぜる。
+  shutterBlend: 0.35,
+  // 5-5（2026-09-17 ユーザー採用）: 光漏れは青白（元Airu実測 R-B −20）。頻度・形は従来どおり。
+  leakTint: 'cool',
+  // HKR-008 段階1: sliderStill＝手ブレスライダーの値（既定0.55）を静止カットの強さにし、動くカットは min(スライダー, moving)
+  // 時間設計（2026-09-17 ユーザー採用 18c）: 動くカットの手ブレは0.04。
+  motionGate: Object.freeze({ mode: 'sliderStill', moving: 0.04, threshold: 0.033 }),
+  // 時間設計（同上）: 手ブレの刻みをコマ保持の格子（24fps）へ一本化／残像は動き量に比例（0.12〜0.32）／
+  // 動くカットだけコマ保持を控えめ（保持率0.10・連続1まで。長い保持は速い被写体で「カットを挟んだ」ように見える）。
+  timeGridUnified: true, motionShutter: 'weak', movingHold: Object.freeze({ rate: 0.10, max: 1 }),
+  // 白のつなぎ（2026-09-18 ユーザー採用）: 元Airuの白は「光の層」ではなく全画面一様の露出オーバー。
+  // flashFrames＝コマ単位の時間構造（1〜2コマで飛ぶ・頂上が揺れる・いきなり切れる／階段で戻る）、flashOver＝露出が飛ぶ階調と色つきの黒の床、
+  // transMix＝つなぎ60で白32%・黒4%（暖色のつなぎなし）、transWrap:-1＝作品の最後の光で借り色の境目（光の輪郭）だけ直す。
+  flashFrames: true, flashOver: true, transMix: Object.freeze({ flash: 0.53, black: 0.07 }), transWrap: -1,
+  // 時間設計3（2026-09-17 ユーザー採用 strong）: 手ブレの止まり。1.5秒の窓ごとに70%で0.4〜1.0秒、手ブレの位置をその場で止める。
+  handheldRest: Object.freeze({ window: 1.5, rate: 0.7, min: 0.4, max: 1.0 }),
+  // HKR-008 段階4: 境目の調和（T7・2026-09-17 ユーザー採用 medium）。
+  harmony: Object.freeze({ defaultLevel: 'medium' }),
+  // HKR-008 段階5 E1: カット別スタイルの抽選（乳白／白飛び／標準）。defaultLevel は比較採用まで 'off'。
+  styleLottery: Object.freeze({ defaultLevel: 'off' }),
+  // 段階3（2026-09-17 ユーザー採用 c）: 明部限定の抽出（0.58→0.70）、芯0.26→0.32、広がり0.30→0.46。値は AOI_BLOOM_LEVELS.c。
+  threshold: 0.70, rolloff: 0, hardnessReduce: 0, bloom: 0.32, wide: 0.46,
+  weave: 0.0005, jump: 0, flicker: 0.003, vignette: 0.28,
+  // 段階5-1（2026-09-17 ユーザー採用 strong）: 粒子を粗く少なく（5／粒径2.0）、輪郭を柔らかく（soften 0.45・半径2.0）。
+  // 高周波 >1/4Nyq 3.04%／>1/2Nyq 0.971% で元Airu（3.0／0.97）と一致。
+  halo: [0.55, 0.75, 1.0], halation: 0.08, veil: 0, soften: 0.45, softRadius: 2.0, chroma: 0, dust: 0, scratch: 0,
+  grainCurve: 0, grain: 5, grainSize: 200, glow: 100, damage: 0, highlightCarry: 0,
+  // 段階5-2（2026-09-17 ユーザー採用 mid+）: 全カット一定の膜と階調。黒+0.04・全体コントラスト−0.08・明部を白へ溶かす0.80・明部色は中立〜やや青。
+  stockContrast: -0.08, stockSaturation: 0, blackLift: 0.04, shoulder: 0, highlightDesat: 0.80,
+  // 空・海の青の色相（2026-09-17 ユーザー採用）: 中間調〜明部の青系だけ 20%（12°）シアンへ。彩度は落とさない（淡くする案は不採用）。
+  shadowBlueToCyan: 0.20,
+  // 段階2（2026-09-17 ユーザー採用 medium）: 暗部を青く深く。明部tintは5-2で中立〜やや青へ置き換え。
+  shadowTint: [-0.012, 0.000, 0.024], highlightTint: [0.000, 0.000, 0.004],
+});
+const isHakumeiProfile = value => value === 'hakumei-v1' || value === 'hakumei-v2'
+  || value === FILM_PROFILES['hakumei-v1'] || value === FILM_PROFILES['hakumei-v2'];
 // key を渡すとその種類を、渡さなければ現在の作品の種類を返す（サムネイルの試し描き用）
 function currentFilmProfile(key) {
   return FILM_PROFILES[key || project.filmProfile] || FILM_PROFILES.home8;
 }
+// HKR-008 段階3（光・にじみ）の比較候補。Astraの観察「明るい場所から周囲へ柔らかく広げ、強い逆光では輪郭が薄れる。
+// 全面の白い膜は掛けない」を、抽出しきい値・芯のブルーム・広いブルームの3値で表す。開発URL `hkr008Bloom=a|b|c`。
+const AOI_BLOOM_LEVELS = Object.freeze({
+  a: Object.freeze({ threshold: 0.66, bloom: 0.26, wide: 0.30 }),   // 明部限定（抽出だけ絞る）
+  b: Object.freeze({ threshold: 0.66, bloom: 0.22, wide: 0.42 }),   // 明部限定＋広く柔らかく
+  c: Object.freeze({ threshold: 0.70, bloom: 0.32, wide: 0.46 }),   // 強い逆光で輪郭が薄れる
+  d: Object.freeze({ threshold: 0.70, bloom: 0.40, wide: 0.60 }),   // 同方向を強く（知覚確認用）
+});
+function aoiBloomOverride(profile) {
+  if (!profile.mvLook) return null;
+  const query = new URLSearchParams(location.search);
+  if (!query.has('dev') || !query.has('hkr005')) return null;
+  return AOI_BLOOM_LEVELS[query.get('hkr008Bloom')] || null;
+}
 function textureFx(effect = project.adjust.effect, profileKey) {
   if (effect !== 2) return FX[effect] || FX[0];
   const profile = currentFilmProfile(profileKey);
+  const bloomOverride = aoiBloomOverride(profile);
   return {
-    ...FX[2], cadence: profile.fps, hz: profile.fps, bloom: profile.bloom, wide: profile.wide,
+    ...FX[2], cadence: profile.fps, hz: profile.grainHz ?? profile.fps, thresh: bloomOverride?.threshold ?? profile.threshold ?? FX[2].thresh,
+    bloom: bloomOverride?.bloom ?? profile.bloom, wide: bloomOverride?.wide ?? profile.wide,
     weave: profile.weave, jump: profile.jump, flicker: profile.flicker, halo: profile.halo,
     vignette: profile.vignette ?? 0.126,
     curve: profile.grainCurve, soften: profile.soften, chroma: profile.chroma, veil: profile.veil,
+    // 既存3profileはfieldを持たないため従来のeffect 2値を保つ。薄明だけ0を明示する。
+    dust: profile.dust ?? FX[2].dust, scratch: profile.scratch ?? FX[2].scratch,
   };
 }
 function applyFilmProfileRecommendations(key) {
@@ -517,6 +627,12 @@ function applyFilmProfileRecommendations(key) {
   project.adjust.glow = profile.glow / 100;
   project.adjust.halation = profile.halation;
   project.adjust.damage = profile.damage;
+  if (isHakumeiProfile(project.filmProfile)) {
+    project.lut = 'none';
+    Object.assign(project.adjust, { handheld: 0, leak: 0, trans: 0, judder: 0, vig: 0, endDur: 0 });
+    project.transOverrides = [];
+    transPlanCache = null;
+  }
 }
 
 // プリセット（2軸）: 日記＝毎日をさっと / MV＝作品としてSNSへ
@@ -524,12 +640,18 @@ function applyFilmProfileRecommendations(key) {
 // 例外は8mmで、4:3であること自体がその質感の一部なので固定する（2026-08-14 ユーザー決定）。
 // newAspect は新規作品を作るときの初期値だけに使い、既存の作品には触れない。
 const PRESETS = {
+  hakumei: { key: 'hakumei', lut: 'none', effect: 2, letterbox: false, filmProfile: 'hakumei-v2',
+    adjust: { handheld: 0, leak: 0, trans: 0, judder: 0, vig: 0, endDur: 0, hakumeiLight: 0 } },
   diary: { key: 'diary', newAspect: '9:16', lut: 'mine', effect: 0, muteAll: false, impLen: 3, letterbox: false, autoAlign: true },
   mv:    { key: 'mv', newAspect: '16:9', lut: 'airu', effect: 1, muteAll: true,  impLen: 5, letterbox: true,  autoAlign: true },
+  // 青い記憶v2（HKR-008・2026-09-17 段階5完了で Look画面と完成イメージに掲載）。
+  // 周辺減光は既定0（2026-09-17 ユーザー決定。Astra「人工的な四隅減光は足さない」）。青い記憶（mv）は作品の vig を引き継ぐ従来どおり。
+  mv2:   { key: 'mv2', newAspect: '16:9', lut: 'airu', effect: 2, muteAll: true, impLen: 5, letterbox: true, autoAlign: true, filmProfile: 'aoi-v2', adjust: { vig: 0 } },
   film8: { key: 'film8', aspect: '4:3', newAspect: '4:3', lut: 'film8', effect: 2, muteAll: true, impLen: 3, letterbox: false, autoAlign: true, filmProfile: 'super8_reversal' },
 };
 // スイッチONで入れる値も同じ表から引く（表を2か所に持たない）
 function motionRecommend(k) {
+  if (isHakumeiProfile(project.filmProfile)) return MOTION_RECOMMEND.hakumei[k];
   return (MOTION_RECOMMEND[project.preset] || MOTION_RECOMMEND.mv)[k];
 }
 
@@ -617,7 +739,8 @@ vec3 handheld(float t, float amt, float hz){
 // fboAへはgradeと同じ規約で書く（FS_FINALが 1-uv.y で読み戻すので、ここで反転してはいけない）。
 // 揺れは映像と同じ式をここでも計算する。JS側で真似ると位相がずれるので必ずシェーダで作る。
 const VS_TEXT = `#version 300 es
-uniform vec4 uRect; uniform float uTime, uSeedPhase, uWeave, uJump, uHandheld, uHandheldHz, uSpliceY;
+uniform vec4 uRect; uniform float uTime, uSeedPhase, uWeave, uJump, uHandheld, uHandheldHz, uHandheldRest, uSpliceY, uAiruScale;
+uniform vec2 uAiruMove;
 uniform float uTextRot, uTextAspect; uniform vec2 uVis;
 out vec2 tuv;
 ${NOISE}
@@ -626,7 +749,7 @@ void main(){
   tuv = p;
   float ft = floor((uTime + uSeedPhase) * 1000.0) / 1000.0;
   vec2 ofs = vec2((vn(ft*1.4)-0.5)*2.0*uWeave, (vn(ft*9.0+37.7)-0.5)*2.0*uJump);
-  vec3 hh = handheld(ft, uHandheld, uHandheldHz);
+  vec3 hh = handheld(ft - uHandheldRest, uHandheld, uHandheldHz);
   // 映像はサンプリング座標をずらすので、画面上は逆向きに 1/uVis 倍で動く。
   // ズームぶんは画面中心まわりに 1/z 倍（映像が寄れば文字も同じだけ寄る＝貼りついて見える）
   // 文字の傾きは、まず uv を見た目の比率へ直してから回す。直さずに回すと、
@@ -637,7 +760,7 @@ void main(){
   d = vec2(d.x * cr - d.y * sr, d.x * sr + d.y * cr);
   d.x /= uTextAspect;
   vec2 o = uRect.xy + uRect.zw * 0.5 + d;
-  o = 0.5 + (o - 0.5) / hh.z - (ofs + hh.xy) / (max(uVis, vec2(0.001)) * hh.z);
+  o = 0.5 + (o - 0.5) / (hh.z * uAiruScale) - (ofs + hh.xy + uAiruMove) / (max(uVis, vec2(0.001)) * hh.z * uAiruScale);
   o.y -= uSpliceY / (max(uVis.y, 0.001) * hh.z);
   gl_Position = vec4(o.x * 2. - 1., 1. - o.y * 2., 0., 1.);
 }`;
@@ -659,14 +782,16 @@ void main(){
 
 const FS_GRADE = `#version 300 es
 precision highp float; precision highp sampler3D;
-uniform sampler2D uFrame; uniform sampler3D uLut;
-uniform float uStrength,uExposure,uContrast,uSaturation,uFade,uTemp,uLutN,uTime,uWeave,uJump,uSeedPhase,uLinearOptics,uHighlightCarry,uHandheld,uHandheldHz,uSpliceY;
-uniform float uStockContrast,uStockSaturation,uStockBlackLift,uStockShoulder;
+uniform sampler2D uFrame; uniform sampler3D uLut; uniform sampler2D uPrev; uniform float uShutter;
+uniform float uStrength,uExposure,uContrast,uSaturation,uFade,uTemp,uTint,uVibrance,uHighlights,uShadows,uWhites,uBlacks,uLutN,uTime,uWeave,uJump,uSeedPhase,uLinearOptics,uHighlightCarry,uHandheld,uHandheldHz,uHandheldRest,uSpliceY,uAiruScale;
+uniform vec2 uAiruMove;
+uniform vec3 uHighlightGrade,uShadowGrade,uMidtoneGrade;
+uniform float uStockContrast,uStockSaturation,uStockBlackLift,uStockShoulder,uHakumeiRolloff,uStockOn,uHighlightDesat,uShadowBlueToCyan,uBlueFade;
 uniform vec3 uStockShadowTint,uStockHighlightTint;
 uniform int uRot; uniform vec2 uVis;
 // HSL・トーンカーブ補正。uCorrOn=0 のときは分岐ごと通らないので、補正ゼロならv3と同じ経路になる。
 // A=クリップ / B=作品全体。clip→projectの順に通す。
-uniform float uCorrOn, uCurveAN, uCurveBN;
+uniform float uCorrOn, uCurveAN, uCurveBN, uSkinProtection, uVisualReferenceC;
 uniform vec3 uHslA[8], uHslB[8];      // (色相ずらし, 彩度倍率, 明るさ) 各 -1..1
 uniform vec2 uCurveA[6], uCurveB[6];  // 0..1 のx昇順ポイント
 in vec2 uv; out vec4 o;
@@ -701,7 +826,13 @@ vec3 hsl2rgb(vec3 hsl){
   float p = 2.0 * l - q;
   return vec3(hue2rgb(p, q, h + 1.0 / 3.0), hue2rgb(p, q, h), hue2rgb(p, q, h - 1.0 / 3.0));
 }
-vec3 applyHsl(vec3 col, vec3 adj[8]){
+vec3 gradeZone(vec3 col, vec3 grade, float weight){
+  if (abs(grade.z) < 0.00001 || grade.y < 0.00001 || weight < 0.00001) return col;
+  vec3 target = hsl2rgb(vec3(mod(grade.x, 360.0), clamp(grade.y, 0.0, 1.0), 0.5));
+  vec3 tint = (target - vec3(0.5)) * 0.32;
+  return col + tint * grade.z * weight;
+}
+vec3 applyHsl(vec3 col, vec3 adj[8], float skinProtection){
   vec3 hsl = rgb2hsl(col);
   float wsum = 0.0; vec3 acc = vec3(0.0);
   for (int i = 0; i < 8; i++) {
@@ -712,10 +843,141 @@ vec3 applyHsl(vec3 col, vec3 adj[8]){
   if (wsum < 1e-4) return col;
   // グレー近傍は色相が定まらない。減衰させないとノイズと色被りを増幅する
   acc = acc / wsum * smoothstep(0.0, 0.15, hsl.y);
+  // 実験候補だけの肌保護。赤〜橙の中彩度・中明度をなだらかに弱め、境界を作らない。
+  float skinHue = 1.0 - smoothstep(26.0, 72.0, abs(mod(hsl.x - 18.0 + 540.0, 360.0) - 180.0));
+  float skinTone = smoothstep(0.12, 0.30, hsl.y) * smoothstep(0.12, 0.28, hsl.z)
+    * (1.0 - smoothstep(0.78, 0.94, hsl.z));
+  acc *= 1.0 - clamp(skinProtection, 0.0, 1.0) * skinHue * skinTone;
   hsl.x = mod(hsl.x + acc.x * 30.0, 360.0);
   hsl.y = clamp(hsl.y * (1.0 + acc.y), 0.0, 1.0);
   hsl.z = clamp(hsl.z + acc.z * 1.2 * hsl.z * (1.0 - hsl.z), 0.0, 1.0);
   return hsl2rgb(hsl);
+}
+float hueDistance(float h, float center){
+  return abs(mod(h - center + 540.0, 360.0) - 180.0);
+}
+float hueBand(float h, float center, float inner, float outer){
+  return 1.0 - smoothstep(inner, outer, hueDistance(h, center));
+}
+// 目視基準C2。元色のHSLと明るさで色域を分け、暖色を保護したまま青緑の空気だけを足す。
+// V1の通常経路ではuVisualReferenceC=0なので、この処理は一切通らない。
+vec3 applyVisualReferenceC(vec3 before, vec3 original, float visualMode){
+  vec3 oh = rgb2hsl(clamp(original, 0.0, 1.0));
+  float ol = dot(clamp(original, 0.0, 1.0), vec3(0.2126, 0.7152, 0.0722));
+  // 純黄〜橙だけを守り、70度以降の黄緑は草のマスクへ渡す。
+  float yellow = hueBand(oh.x, 52.0, 8.0, 18.0) * smoothstep(0.20, 0.42, oh.y)
+    * smoothstep(0.28, 0.44, oh.z);
+  float skin = hueBand(oh.x, 18.0, 22.0, 52.0) * smoothstep(0.10, 0.24, oh.y)
+    * smoothstep(0.16, 0.30, oh.z) * (1.0 - smoothstep(0.78, 0.93, oh.z));
+  float cherry = max(hueBand(oh.x, 345.0, 18.0, 48.0), hueBand(oh.x, 8.0, 18.0, 42.0))
+    * smoothstep(0.10, 0.24, oh.y) * smoothstep(0.16, 0.30, oh.z);
+  float sunset = hueBand(oh.x, 30.0, 22.0, 44.0) * smoothstep(0.24, 0.42, oh.y)
+    * smoothstep(0.28, 0.45, ol) * (1.0 - smoothstep(0.84, 0.96, ol));
+  float warmProtect = clamp(max(max(skin, cherry), max(sunset, yellow)), 0.0, 1.0);
+
+  // 黄花・夕景を避け、黄緑〜緑の帯だけをエメラルド側へ動かす。
+  float grassHue = smoothstep(62.0, 72.0, oh.x) * (1.0 - smoothstep(140.0, 174.0, oh.x));
+  float grass = grassHue * smoothstep(0.18, 0.40, oh.y) * smoothstep(0.06, 0.18, ol)
+    * (1.0 - smoothstep(0.90, 0.98, ol)) * (1.0 - yellow * 0.65);
+  vec3 outColor = before;
+  vec3 gh = rgb2hsl(clamp(before, 0.0, 1.0));
+  // 草は近傍へ少しずらすのでなく、青緑の目標帯へ十分に寄せる。
+  // 基本の0.68は低〜中彩度へ残し、高彩度の草だけをsmoothstepで最大0.38相当へ圧縮する。
+  gh.x = mod(mix(gh.x, 150.0, 0.72), 360.0);
+  float grassHighSat = smoothstep(0.36, 0.68, oh.y);
+  gh.y = clamp(gh.y * mix(0.68, 0.38, grassHighSat), 0.0, 1.0);
+  gh.z = clamp(gh.z + 0.004, 0.0, 1.0);
+  outColor = mix(outColor, hsl2rgb(gh), grass);
+  // 草の混合後に残る高彩度だけを、草マスクの量に比例してもう一段なだらかに圧縮する。
+  // 色相・明度は触らず、暖色保護域では追加圧縮を掛けない。
+  vec3 postGrassHsl = rgb2hsl(clamp(outColor, 0.0, 1.0));
+  float postGrassKnee = grass * (1.0 - warmProtect) * smoothstep(0.30, 0.60, postGrassHsl.y);
+  postGrassHsl.y = clamp(postGrassHsl.y * mix(1.0, 0.64, postGrassKnee), 0.0, 1.0);
+  outColor = hsl2rgb(postGrassHsl);
+
+  // モード2だけ、緑の彩度と輝度をもう一段だけ沈める。
+  // 元色の彩度・輝度で日向の高彩度部分を滑らかに選び、純黄・夕景・肌・桜は保護する。
+  if (visualMode > 1.5 && visualMode < 2.5) {
+    float greenDown = grass * (1.0 - warmProtect)
+      * smoothstep(0.22, 0.54, oh.y) * smoothstep(0.18, 0.44, ol);
+    vec3 mutedGrassHsl = rgb2hsl(clamp(outColor, 0.0, 1.0));
+    mutedGrassHsl.y = clamp(mutedGrassHsl.y * mix(1.0, 0.48, greenDown), 0.0, 1.0);
+    mutedGrassHsl.z = clamp(mutedGrassHsl.z - 0.045 * greenDown, 0.0, 1.0);
+    outColor = hsl2rgb(mutedGrassHsl);
+  }
+
+  // 草との重複を減らし、暗部をそのまま残したうえで中間部と明部を分ける。
+  float blueHue = smoothstep(174.0, 188.0, oh.x) * (1.0 - smoothstep(258.0, 292.0, oh.x));
+  float blue = blueHue * smoothstep(0.12, 0.28, oh.y);
+  // 0.28未満の暗部は現行Cと同じく処理しない。0.50〜0.68付近で中間から明部へ滑らかに渡す。
+  float blueSplit = smoothstep(0.50, 0.68, oh.z);
+  float midBlue = blue * smoothstep(0.28, 0.42, oh.z) * (1.0 - blueSplit);
+  float brightBlue = blue * blueSplit * (1.0 - smoothstep(0.86, 0.96, oh.z));
+  vec3 bm = rgb2hsl(clamp(outColor, 0.0, 1.0));
+  // 海の中間部はCより弱いターコイズ。彩度と明るさを残して深さを保つ。
+  bm.x = mod(mix(bm.x, 198.0, 0.30), 360.0);
+  bm.y = clamp(bm.y * 0.78, 0.0, 1.0);
+  outColor = mix(outColor, hsl2rgb(bm), midBlue);
+
+  // 明るい反射だけを低彩度の白シアンへ柔らかくし、暗い青は濃度を残す。
+  vec3 bh = rgb2hsl(clamp(outColor, 0.0, 1.0));
+  bh.x = mod(mix(bh.x, 190.0, 0.50), 360.0);
+  bh.y = clamp(bh.y * 0.58, 0.0, 1.0);
+  bh.z = clamp(bh.z + 0.012, 0.0, 1.0);
+  outColor = mix(outColor, hsl2rgb(bh), brightBlue);
+
+  // 黒を持ち上げず、暖色と濃い青を除いた暗部〜中間部へだけ薄い青緑の空気を置く。
+  float air = smoothstep(0.035, 0.18, ol) * (1.0 - smoothstep(0.58, 0.78, ol))
+    * (1.0 - warmProtect) * (1.0 - blueHue * 0.95);
+  outColor += vec3(-0.003, 0.005, 0.007) * air;
+
+  // 肌・桜・夕景・黄花は候補処理前へ滑らかに戻し、境界を作らない。
+  vec3 result = mix(outColor, before, warmProtect);
+
+  // モード3はC2現状を基準に、日向の黄〜黄緑ハイライトだけを静める比較候補。
+  // 純黄の車両・花、夕景、肌、桜を除外し、鮮やかなレモン色を淡いオリーブへ寄せる。
+  if (visualMode > 2.5 && visualMode < 3.5) {
+    float yellowHighlightHue = smoothstep(56.0, 66.0, oh.x)
+      * (1.0 - smoothstep(92.0, 108.0, oh.x));
+    float yellowHighlightSat = smoothstep(0.20, 0.48, oh.y);
+    float yellowHighlightLuma = smoothstep(0.40, 0.62, ol)
+      * (1.0 - smoothstep(0.90, 0.98, ol));
+    float pureYellowObject = hueBand(oh.x, 50.0, 6.0, 14.0)
+      * smoothstep(0.48, 0.76, oh.y);
+    float subjectProtect = clamp(max(max(skin, cherry), max(sunset, pureYellowObject)), 0.0, 1.0);
+    float yellowHighlight = yellowHighlightHue * yellowHighlightSat * yellowHighlightLuma
+      * (1.0 - subjectProtect);
+    vec3 yh = rgb2hsl(clamp(result, 0.0, 1.0));
+    yh.x = mod(mix(yh.x, 78.0, 0.32), 360.0);
+    yh.y = clamp(yh.y * 0.52, 0.0, 1.0);
+    yh.z = clamp(yh.z - 0.055, 0.0, 1.0);
+    result = mix(result, hsl2rgb(yh), yellowHighlight);
+  }
+
+  // モード4はユーザーの写真を基準に、黄色と青緑を混ぜずに分離する比較候補。
+  // C2変換後にも黄色として残った明部だけを柔らかな麦色へ整え、青緑へ変わった画素は触らない。
+  if (visualMode > 3.5) {
+    vec3 rh = rgb2hsl(clamp(result, 0.0, 1.0));
+    float residualYellowHue = smoothstep(44.0, 54.0, rh.x)
+      * (1.0 - smoothstep(74.0, 88.0, rh.x));
+    float sourceYellowHue = smoothstep(48.0, 58.0, oh.x)
+      * (1.0 - smoothstep(82.0, 94.0, oh.x));
+    float yellowHighlightSat = smoothstep(0.24, 0.52, rh.y);
+    float yellowHighlightLuma = smoothstep(0.46, 0.64, ol)
+      * (1.0 - smoothstep(0.92, 0.99, ol));
+    float pureYellowObject = hueBand(oh.x, 50.0, 5.0, 13.0)
+      * smoothstep(0.52, 0.78, oh.y);
+    float blueGreenProtect = smoothstep(88.0, 106.0, oh.x);
+    float subjectProtect = clamp(max(max(skin, cherry), max(sunset, pureYellowObject)), 0.0, 1.0);
+    float separatedYellow = residualYellowHue * sourceYellowHue * yellowHighlightSat * yellowHighlightLuma
+      * (1.0 - subjectProtect) * (1.0 - blueGreenProtect);
+    vec3 separated = rh;
+    separated.x = mod(mix(separated.x, 56.0, 0.14), 360.0);
+    separated.y = clamp(separated.y * 0.74, 0.0, 1.0);
+    separated.z = clamp(separated.z - 0.028, 0.0, 1.0);
+    result = mix(result, hsl2rgb(separated), separatedYellow);
+  }
+  return result;
 }
 float curveEval(vec2 p[6], int n, float x){
   if (n < 2) return x;
@@ -743,34 +1005,68 @@ vec3 applyCurve(vec3 col, vec2 p[6], float n){
   if (l < 1e-4) return col;
   return clamp(col * (curveEval(p, int(n), l) / l), 0.0, 1.0);
 }
+// HKR-006 Phase 2の比較専用ハイライト・ロールオフ。
+// ニー以降の高輝度をなだらかに圧縮し、RGB比率は保つ。strength=0は厳密に素通し。
+vec3 applyHakumeiRolloff(vec3 col, float strength){
+  if (strength <= 0.0) return col;
+  const float knee = 0.68;
+  float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
+  if (l <= knee || l <= 1e-5) return col;
+  float range = 1.0 - knee;
+  float x = max(l - knee, 0.0);
+  float t = x / max(range, 1e-5);
+  float k = 0.35 * clamp(strength, 0.0, 1.0);
+  float compressedT = t / (1.0 + k * t);
+  float target = knee + range * compressedT;
+  // ニー直上から急に段差を作らず、0.68〜0.78で効き始める。
+  float blend = smoothstep(knee, knee + 0.10, l);
+  float outL = mix(l, target, blend);
+  return col * (outL / l);
+}
 void main(){
   float ft = floor((uTime + uSeedPhase) * 1000.0) / 1000.0;
-  vec3 hh = handheld(ft, uHandheld, uHandheldHz);
-  vec2 e = 0.5 + (uv - 0.5) * uVis * hh.z + hh.xy;
+  vec3 hh = handheld(ft - uHandheldRest, uHandheld, uHandheldHz);
+  vec2 e = 0.5 + (uv - 0.5) * uVis * hh.z * uAiruScale + hh.xy + uAiruMove;
   // スプライス通過の縦ジャンプ。範囲外に出た分は黒が見える＝実物でもコマ端が覗く
   e.y += uSpliceY;
   // 横はゆっくり漂い(weave)、縦は細かく跳ねる(jump)。実際のフィルムはこの2つで性質が違う
   e += vec2((vn(ft*1.4)-0.5)*2.0*uWeave, (vn(ft*9.0+37.7)-0.5)*2.0*uJump);
   vec2 s = uRot==0 ? e : uRot==90 ? vec2(e.y, 1.0-e.x) : uRot==180 ? 1.0-e : vec2(1.0-e.y, e.x);
   if (s.x < 0. || s.x > 1. || s.y < 0. || s.y > 1.) { o = vec4(0.,0.,0.,1.); return; }
-  vec3 c = texture(uFrame, s).rgb;
+  vec3 original = texture(uFrame, s).rgb;
+  vec3 c = original;
   c *= exp2(uExposure);
   c.r *= 1.0 + uTemp*0.14;
   c.b *= 1.0 - uTemp*0.14;
+  c.r *= 1.0 + uTint*0.05;
+  c.g *= 1.0 - uTint*0.10;
+  c.b *= 1.0 + uTint*0.05;
+  float zoneLum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  float shW = 1.0 - smoothstep(0.12, 0.58, zoneLum);
+  float hiW = smoothstep(0.42, 0.88, zoneLum);
+  float blW = 1.0 - smoothstep(0.02, 0.28, zoneLum);
+  float whW = smoothstep(0.70, 0.98, zoneLum);
+  c += vec3(uShadows * shW * 0.24 + uHighlights * hiW * 0.28 + uBlacks * blW * 0.16 + uWhites * whW * 0.18);
   c = (c - 0.5) * (1.0 + uContrast) + 0.5;
   float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
   c = mix(vec3(lum), c, 1.0 + uSaturation);
+  float chroma = max(max(c.r,c.g),c.b) - min(min(c.r,c.g),c.b);
+  c = mix(vec3(lum), c, 1.0 + uVibrance * (1.0 - clamp(chroma * 2.0, 0.0, 1.0)));
+  c = gradeZone(c, uShadowGrade, 1.0 - smoothstep(0.18, 0.58, lum));
+  c = gradeZone(c, uMidtoneGrade, 1.0 - smoothstep(0.12, 0.38, abs(lum - 0.5)));
+  c = gradeZone(c, uHighlightGrade, smoothstep(0.45, 0.86, lum));
   c = mix(c, c * 0.82 + 0.13, uFade);
   // 補正前を退避しておく。8mmの明部持ち越し(overLinear)は1.0を超える余地から作るので、
   // clampの要る補正のあとの値を使うと持ち越しが死ぬ。
   vec3 preCorr = c;
   if (uCorrOn > 0.5) {
     c = clamp(c, 0.0, 1.0);
-    c = applyHsl(c, uHslA);
+    c = applyHsl(c, uHslA, 0.0);
     c = applyCurve(c, uCurveA, uCurveAN);
-    c = applyHsl(c, uHslB);
+    c = applyHsl(c, uHslB, uSkinProtection);
     c = applyCurve(c, uCurveB, uCurveBN);
   }
+  if (uVisualReferenceC > 0.5) c = applyVisualReferenceC(c, original, uVisualReferenceC);
   vec3 encodedBeforeLut = c;
   vec3 encodedClamped = clamp(encodedBeforeLut, 0., 1.);
   vec3 g = texture(uLut, encodedClamped * ((uLutN-1.0)/uLutN) + (0.5/uLutN)).rgb;
@@ -778,17 +1074,48 @@ void main(){
   c = mix(encodedBeforeLut, g, uStrength);
   // LUTは従来どおりencoded値で読む。8mm光学系だけ、その後をlinearへ移して
   // LUT入力で失われる1.0超の明部を別経路で持ち直す。
-  if (uLinearOptics > 0.5) {
-    // stock差はeffect 2の中だけでencoded階調へ適用する。RGBA8 fallbackでも残る。
+  // stock差（階調の道具）はencoded階調へ適用する。8mm・薄明に加え、linear optics無しの青い記憶v2でも使えるよう
+  // linearブロックの外へ出した（HKR-008 段階2・2026-09-17）。順序は従来どおり「stock→toLinear」のまま。
+  // 値が全部0のprofileは uStockOn=0 で通らないので、画素一致を保つ。RGBA8 fallbackでも残る。
+  if (uStockOn > 0.5) {
     float stockLum = dot(c, vec3(0.2126, 0.7152, 0.0722));
     c = (c - vec3(0.5)) * (1.0 + uStockContrast) + vec3(0.5 + uStockBlackLift);
     c = mix(vec3(dot(c, vec3(0.2126, 0.7152, 0.0722))), c, 1.0 + uStockSaturation);
     c += uStockShadowTint * (1.0 - smoothstep(0.12, 0.58, stockLum));
     c += uStockHighlightTint * smoothstep(0.48, 0.92, stockLum);
     c = c / (vec3(1.0) + max(c - vec3(0.55), vec3(0.0)) * uStockShoulder);
+    // 空・海の青を淡い記憶色へ（HKR-008 比較）: 色相195〜260°の画素を、中間調〜明部で、彩度を uBlueFade 割合だけ落とし、
+    // 色相を uShadowBlueToCyan 割合（1.0=60°）だけシアンへ回す。暗部は影の青（shadowTint）を保つため対象外。
+    if (uShadowBlueToCyan > 0.0 || uBlueFade > 0.0) {
+      float mx = max(max(c.r, c.g), c.b), mn = min(min(c.r, c.g), c.b), dl = mx - mn;
+      if (dl > 0.01) {
+        float hue = mx == c.r ? mod((c.g - c.b) / dl, 6.0) : mx == c.g ? (c.b - c.r) / dl + 2.0 : (c.r - c.g) / dl + 4.0;
+        float hdeg = hue * 60.0;
+        float inBlue = smoothstep(185.0, 200.0, hdeg) * (1.0 - smoothstep(255.0, 270.0, hdeg));
+        float brightW = smoothstep(0.22, 0.55, dot(c, vec3(0.2126, 0.7152, 0.0722)));
+        float w = inBlue * brightW;
+        float rot = -60.0 * uShadowBlueToCyan * w;
+        float h2 = mod(hdeg + rot + 360.0, 360.0) / 60.0;
+        float dl2 = dl * (1.0 - uBlueFade * w);
+        float x = dl2 * (1.0 - abs(mod(h2, 2.0) - 1.0));
+        vec3 rgb1 = h2 < 1.0 ? vec3(dl2, x, 0.0) : h2 < 2.0 ? vec3(x, dl2, 0.0) : h2 < 3.0 ? vec3(0.0, dl2, x) : h2 < 4.0 ? vec3(0.0, x, dl2) : h2 < 5.0 ? vec3(x, 0.0, dl2) : vec3(dl2, 0.0, x);
+        // 彩度を落とした分は輝度を保つように最小値側へ戻す
+        c = rgb1 + vec3(mn + (dl - dl2) * 0.5);
+      }
+    }
+    // 明部の彩度落とし（HKR-008 5-2）: 明るいところほど白へ溶かす
+    if (uHighlightDesat > 0.0) {
+      float hl = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      c = mix(c, vec3(hl), uHighlightDesat * smoothstep(0.55, 0.92, hl));
+    }
+  }
+  if (uLinearOptics > 0.5) {
     vec3 overLinear = clamp(max(toLinear(max(preCorr, vec3(0.0))) - vec3(1.0), vec3(0.0)), vec3(0.0), vec3(2.0));
     c = toLinear(clamp(c, 0.0, 1.0)) + overLinear * uHighlightCarry;
+    c = applyHakumeiRolloff(c, uHakumeiRolloff);
   } else c = clamp(c, 0.0, 1.0);
+  // シャッターの残像（HKR-008 5-4）: 直前フレームの結果と混ぜる（連続するフレームのときだけ描画側が有効化）
+  if (uShutter > 0.0) c = mix(c, texture(uPrev, vec2(uv.x, 1.0 - uv.y)).rgb, uShutter);   // fboAはFS_FINALと同じく 1-uv.y で読む
   o = vec4(c, 1.0);
 }`;
 
@@ -810,7 +1137,8 @@ void main(){
 const FS_FINAL = `#version 300 es
 precision highp float;
 uniform sampler2D uBase, uBloom, uBloomWide, uGrainTex;
-uniform float uBloomAmt,uWideAmt,uHalation,uVeil,uLetterbox,uVignette,uFlicker,uDust,uScratch,uGrain,uGrainScale,uTime,uGrainCurve,uSoften,uChroma,uDamage,uSeedPhase,uLeak,uTransAmt,uTransPhase;
+uniform float uBloomAmt,uWideAmt,uHalation,uVeil,uLetterbox,uVignette,uFlicker,uDust,uScratch,uGrain,uGrainScale,uTime,uGrainCurve,uSoften,uSoftRadius,uLeakCool,uHardnessReduce,uChroma,uDamage,uSeedPhase,uLeak,uTransAmt,uTransPhase,uTransWrap,uOverOn,uOverFar;
+uniform vec3 uOverFloor,uOverCast;
 uniform int uTransKind;
 uniform float uTransGrad, uTransSeed, uTransTint;
 uniform vec2 uTransDir;
@@ -842,6 +1170,20 @@ float grainWeight(float l, float uCurve){
   float sh = smoothstep(0.0, 0.15, l) * (mix(1.0, 0.63, smoothstep(0.19, 0.60, l)) + 0.06 * smoothstep(0.62, 0.95, l));
   return mix(mid, sh, uCurve);
 }
+// HKR-006 Phase 2の比較専用硬さ低減。uBaseの4近傍から局所輝度差を測り、
+// 先に明暗差だけを狭める。色比率は保ち、uSoftenとは独立した前段の処理にする。
+vec3 reduceHardness(vec3 center, vec3 neighbors, float strength){
+  float l0 = dot(center, vec3(0.2126, 0.7152, 0.0722));
+  if (l0 <= 1e-5 || strength <= 0.0) return center;
+  float ln = dot(neighbors, vec3(0.2126, 0.7152, 0.0722));
+  float d = l0 - ln;
+  float edge = smoothstep(0.02, 0.10, abs(d));
+  // 通常経路はJS側で0.3以下に制限し、HKR-006の強0.40だけ比較用に許可する。
+  float s = clamp(strength, 0.0, 0.4);
+  float targetL = mix(l0, ln, s * edge);
+  float ratio = clamp(targetL / l0, 1.0 - s, 1.25);
+  return center * ratio;
+}
 void main(){
   if (uv.y < uLetterbox || uv.y > 1.0 - uLetterbox) { o = vec4(0.,0.,0.,1.); return; }
   // 映像の外（アスペクト差の黒帯）はフィルムが存在しない場所。滲みも粒子もハレーションも出さない
@@ -849,11 +1191,28 @@ void main(){
   if (abs(uv.x - 0.5) > visLim.x || abs(uv.y - 0.5) > visLim.y) { o = vec4(0.,0.,0.,1.); return; }
   vec2 suv = vec2(uv.x, 1.0 - uv.y);
   vec3 c = texture(uBase, suv).rgb;
+  if (uHardnessReduce > 0.0) {
+    vec3 neighbors = (texture(uBase, suv + vec2(uTexel.x, 0.0)).rgb
+                    + texture(uBase, suv - vec2(uTexel.x, 0.0)).rgb
+                    + texture(uBase, suv + vec2(0.0, uTexel.y)).rgb
+                    + texture(uBase, suv - vec2(0.0, uTexel.y)).rgb) * 0.25;
+    c = reduceHardness(c, neighbors, uHardnessReduce);
+  }
   // 8mmの実効解像度は低いので、粒子を乗せる前に少しだけ甘くする（デジタルの硬さを取る）
   if (uSoften > 0.0) {
-    vec3 s = texture(uBase, suv + vec2(uTexel.x, 0.0)).rgb + texture(uBase, suv - vec2(uTexel.x, 0.0)).rgb
-           + texture(uBase, suv + vec2(0.0, uTexel.y)).rgb + texture(uBase, suv - vec2(0.0, uTexel.y)).rgb;
-    c = mix(c, (c * 2.0 + s) / 6.0, uSoften);
+    if (uSoftRadius == 1.0) {
+      vec3 s = texture(uBase, suv + vec2(uTexel.x, 0.0)).rgb + texture(uBase, suv - vec2(uTexel.x, 0.0)).rgb
+             + texture(uBase, suv + vec2(0.0, uTexel.y)).rgb + texture(uBase, suv - vec2(0.0, uTexel.y)).rgb;
+      c = mix(c, (c * 2.0 + s) / 6.0, uSoften);
+    } else {
+      // HKR-008 段階5-1: 解像感を落とす広い8点カーネル（半径 uSoftRadius × texel）。青い記憶v2だけが使う。
+      vec2 t = uTexel * uSoftRadius; vec2 d = t * 0.7071;
+      vec3 s = texture(uBase, suv + vec2(t.x, 0.0)).rgb + texture(uBase, suv - vec2(t.x, 0.0)).rgb
+             + texture(uBase, suv + vec2(0.0, t.y)).rgb + texture(uBase, suv - vec2(0.0, t.y)).rgb
+             + texture(uBase, suv + d).rgb + texture(uBase, suv - d).rgb
+             + texture(uBase, suv + vec2(d.x, -d.y)).rgb + texture(uBase, suv - vec2(d.x, -d.y)).rgb;
+      c = mix(c, (c * 2.0 + s) / 10.0, uSoften);
+    }
   }
   if (uChroma > 0.0) {
     c.r = mix(c.r, texture(uBase, suv + vec2(uTexel.x * 0.75, 0.0)).r, uChroma);
@@ -937,6 +1296,8 @@ void main(){
     vec3 tint = ci < 1.0 ? vec3(1.0, 0.78, 0.14)
               : ci < 2.0 ? vec3(1.0, 0.25, 0.08)
                          : vec3(1.0, 0.94, 0.90);
+    // 青い記憶v2（HKR-008 5-5）: 元Airuの光漏れは青白（R-B −20）。暖色3種を青白系（白青／水色白／淡青）に置き換える
+    if (uLeakCool > 0.5) tint = ci < 1.0 ? vec3(0.82, 0.92, 1.0) : ci < 2.0 ? vec3(0.88, 0.97, 1.0) : vec3(0.75, 0.86, 1.0);
     c += tint * on * env * pulse * flick * shape * uLeak * 0.85;
   }
   // light leakはdamageが高い時だけ、長めのfilm frame群で端から稀に入る。
@@ -982,7 +1343,44 @@ void main(){
     // ムラは大きな塊で。細かいと粒ノイズに見える
     float m = mix(0.55, 1.0, texture(uGrainTex, uv * 0.12 + vec2(uTransSeed * 7.3, uTransSeed * 3.1)).r);
 
-    if (uTransKind == 1) {
+    if (uTransKind == 9) {                       // HKR-006 T3: A/B共通のLight Connection
+      // クリップごとの明部色を正規化すると、境界で赤紫→青緑の色斑に切り替わる。
+      // 境界seedと両端観察から決めた一つの低彩度ヴェールを主役にし、元画のBloomは無彩色で僅かに借りる。
+      float kk9 = clamp(k, 0.0, 1.0);
+      vec3 veil9 = uTransTint > 0.0 ? vec3(1.000, 0.992, 0.982)
+        : uTransTint < 0.0 ? vec3(0.982, 0.992, 1.000) : vec3(0.990, 0.994, 1.000);
+      float sourceGlow9 = clamp(dot(wide * 0.72 + bl * 0.28, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+      float kg9 = kk9 * mix(0.84, 1.0, gDir);
+      c = c * (1.0 - 0.34 * kg9)
+        + veil9 * (0.40 * kg9)
+        + vec3(sourceGlow9) * (0.10 * kg9);
+      c = shoulderTone(c, 1.8);
+    } else if (uTransKind == 1 && uOverOn > 0.5) {
+      // 露出が飛ぶコマ（HKR-008 F2・元Airu実測）。光の層を重ねるのではなく、画面全体に一様な「露出オーバーの階調」を掛ける。
+      // 実測（通常コマの輝度帯→光のコマ）: 0-16→(204,167,173)／48-64→(223,209,217)／64-96→(233,224,230)／128以上→250以上。
+      // ＝暗部は色つきの床（uOverFloor）に持ち上がってシルエットだけ残り、中間より上は白へ飛ぶ。空間の勾配・光の形は無い。
+      float ko = clamp(k * 1.25, 0.0, 1.0);
+      float lo = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      vec3 xo = clamp(mix(vec3(lo), c, 0.5), 0.0, 1.0);
+      // 暗部は床の近くに留め、中間から急に白へ飛ばす（実測 23.60s: x=.09→.06／.22→.37／.31→.57／.57→.82）。
+      // 傾きが緩いと暗部まで乳白になり、シルエットが眠くなる（2026-09-18 目視）。
+      vec3 so = 1.0 - exp(-9.0 * xo * xo);
+      // 空間の出方（合成案・2026-09-18）: uOverFar=0 は全面一様（元Airu 27個中11個）。>0 は片側から飛ぶ型（16個。頂上でも
+      // 遠い側のブロックは157〜220に留まる）。向きは uTransDir（黄金角で境目ごとに回る）。幅の広い勾配に粒子テクスチャの
+      // 大きなむらを掛け、直線の縁が見えないようにする。
+      if (uOverFar > 0.0) {
+        float sp = smoothstep(0.0, 1.0, clamp(dot(uv - 0.5, uTransDir) * 1.1 + 0.5, 0.0, 1.0));
+        sp *= mix(0.90, 1.10, texture(uGrainTex, uv * 0.08 + vec2(uTransSeed * 2.9, uTransSeed * 5.3)).g);
+        ko *= mix(uOverFar, 1.0, clamp(sp, 0.0, 1.0));
+      }
+      c = mix(c, uOverFloor + (vec3(1.0) - uOverFloor) * so, ko);
+      // 滲み（2026-09-18 ユーザー「滲みが重要」）: 露出が飛んだコマでは、照明や窓の周りが柔らかくにじんで広がる（元Airu）。
+      // 階調だけだと平らな板になる。明部だけを抜いた滲み（wide/bl）をスクリーン合成で足す。白い所には効かず、周りだけが光る。
+      vec3 glowO = clamp((wide * 1.0 + bl * 0.6) * (1.6 * ko), 0.0, 1.0);
+      c = 1.0 - (1.0 - c) * (1.0 - glowO);
+      // 抜けぎわの色被り（元Airu実測: シアン／黄／桃／無彩色がイベントごとに違う）。白の最中は rec≈0 で効かない。
+      c *= mix(vec3(1.0), uOverCast, abs(uTransTint));
+    } else if (uTransKind == 1) {
       // 【2026-08-16 実装ミスの修正】前版は「画を自分のボケと置き換える」ため wide/bl を主役にしたが、
       // このシェーダの wide/bl は **明部だけを抜き出した滲み**（閾値処理済み）であって全画面のボケではない。
       // 置き換えると画が暗く沈む（実測: k=0.6 で平均158→120）＝ユーザー評「暗く滲む」。
@@ -999,14 +1397,39 @@ void main(){
       vec3 veilCol = wsum / max(max(wsum.r, wsum.g), wsum.b);
       // 借用は0.20まで下げる。0.55だと窓の青を拾って寒色に転び、参照の暖かい光と別物になる。
       // 基準色(1.0,0.985,0.965)は参照8イベントの加算成分の中央値(1.000/0.984/0.965)と一致。
-      veilCol = mix(vec3(1.0, 0.985, 0.965), veilCol, 0.20);
+      // 借り色は「滲みの色を最大値で正規化」して作るため、滲みがごく僅かでも色は最大の濃さになる。青い記憶v2は滲みの
+      // 閾値が高く（0.70）、空の途中で滲みが0になる。その境目が桃色の弧の輪郭として見えていた（HKR-008・2026-09-17）。
+      // 包む光（uTransWrap）では、滲みの量に応じて借りる割合を下げ、境目を消す。
+      // uTransWrap<0 は「旧来の光のまま、借り色の境目だけ直す」（classic）。
+      float borrowT = 0.20 * mix(1.0, smoothstep(0.02, 0.35, max(max(wsum.r, wsum.g), wsum.b)), min(abs(uTransWrap), 1.0));
+      veilCol = mix(vec3(1.0, 0.985, 0.965), veilCol, borrowT);
       veilCol *= uTransTint > 0.0 ? vec3(1.03, 1.00, 0.98) : vec3(0.98, 1.00, 1.02);
-      // 減衰と加算は**同じ kg** で動かす。別々にすると、光の届いていない側で画だけが弱まり
-      // 「暗く滲む」が再発する（実測: 分離すると弱い側の増分が負になり比が135〜553に暴れた）。
-      float kg = kk * gDir;
-      c = c * (1.0 - 0.68 * kg)                  // 画は弱まる（回帰のゲイン0.32）
-        + veilCol * (1.20 * kg)                  // 光を足す（回帰の加算0.78・勾配ぶんを見込んで1.20）
-        + (wide * 0.9 + bl * 0.5) * (0.55 * kg); // 滲みは柔らかさ担当
+      // 青い記憶v2（HKR-008）: 光に包まれて次へ移る（uTransWrap>0）。元Airu実測の頂上は 平均244〜251・5%点208以上・
+      // 白飛び81〜99%＝全面が白に包まれ、絵はほぼ消える。従来は頂上でも勾配（uTransGrad）が残り、v2では
+      // 飛んだ領域の縁が「光の輪郭」に見えていた。立ち上がりの「起点から広がる」は保ち、頂上だけ全面へ届かせる。
+      vec3 glowT = wide * 0.9 + bl * 0.5;
+      float addT = 1.20, cutT = 0.68;
+      float gDirT = gDir;
+      if (uTransWrap > 0.0) {
+        float reach = smoothstep(0.35, 0.90, kk);                       // 頂上へ向けて全面に届く
+        // 光の届き方の空間勾配をなだらかにする（傾き1.4→0.8）。急だと飛んだ領域の縁が弧の輪郭に見える。
+        float sW = smoothstep(0.0, 1.0, clamp(dot(uv - 0.5, uTransDir) * 0.8 + 0.5, 0.0, 1.0));
+        float gW = clamp((fl + (1.0 - fl) * sW) * mix(0.90, 1.10, texture(uGrainTex, uv * 0.10 + vec2(uTransSeed * 3.7, uTransSeed * 1.9)).g), 0.0, 1.0);
+        gDirT = mix(mix(gDir, gW, uTransWrap), 1.0, reach * uTransWrap);
+        // 強い光ではチャンネルごとに飛ぶ順が違い、縁に色の段差が出る。光が強いほど絵の彩度を抜いてから足す。
+        float lw = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        c = mix(c, vec3(lw), 0.80 * smoothstep(0.40, 0.95, kk * gDirT) * uTransWrap);
+        // 足す光は控えめにして、頂上でも暗部にわずかに絵を残す（元Airuの頂上 std11〜18・5%点208〜252）
+        // 滲みは「明部だけ」を抜いた像なので、空のように明るさがなだらかに変わる画では抜き出しの境目が弧の輪郭になり、
+        // 色（夕空の桃色）も乗る。包む光ではヴェールが主役なので、滲みは明るさだけを弱く借りる。
+        glowT = mix(glowT, vec3(dot(glowT, vec3(0.2126, 0.7152, 0.0722))) * 0.35, uTransWrap);
+        cutT = mix(0.68, 0.80, uTransWrap);
+        addT = mix(1.20, 1.05, uTransWrap);
+      }
+      float kg = kk * gDirT;
+      c = c * (1.0 - cutT * kg)                  // 画は弱まる（回帰のゲイン0.32）
+        + veilCol * (addT * kg)                  // 光を足す（回帰の加算0.78・勾配ぶんを見込んで1.20）
+        + glowT * (0.55 * kg);                   // 滲みは柔らかさ担当
       // 回復側の色被り（ユーザー目視②）。符号で系統、絶対値で強さ。実測 R-B ±0.14 / R-G ±0.10。
       // 白の最中は rec≈0 なので効かず、抜けぎわの数コマにだけ色が出る。
       float rec = abs(uTransTint);
@@ -1130,9 +1553,40 @@ function makeGrainTexture(size, seed = project.textureSeed) {
   return { data: out, size, seed: seed >>> 0 };
 }
 
-// クリップに効く補正（手動＋自動そろえ）
-function clipBrightOf(c) { return c ? (c.bright || 0) + (project.autoAlign ? (c.autoBright || 0) : 0) : 0; }
-function clipTempOf(c) { return c ? (c.temp || 0) + (project.autoAlign ? (c.autoTemp || 0) : 0) : 0; }
+// クリップに効く補正（手動＋自動そろえ）。Autoの量はAuto層だけへ掛ける。
+function autoAmountOf(value = project.autoAmount) {
+  return Number.isFinite(value) ? clamp(value, 0, 1) : 1;
+}
+function storedAutoAmount(value) { return Number.isFinite(value) ? clamp(value, 0, 1) : 1; }
+function clipBrightOf(c, autoAlign = project.autoAlign, autoAmount = project.autoAmount) {
+  return c ? (c.bright || 0) + (autoAlign ? (c.autoBright || 0) * autoAmountOf(autoAmount) : 0) : 0;
+}
+function clipTempOf(c, autoAlign = project.autoAlign, autoAmount = project.autoAmount) {
+  return c ? (c.temp || 0) + (autoAlign ? (c.autoTemp || 0) * autoAmountOf(autoAmount) : 0) : 0;
+}
+// カットの頭でAuto補正だけを短く受け渡す。値そのものは保存せず、見た目だけを
+// なじませる。手動補正・Look・質感は即時のままなので、ユーザーが決めた調整を
+// 勝手に弱めない。プレビューと書き出しが同じ renderAtTimelineTime を通る。
+const AUTO_HANDOFF_SEC = 0.12;
+function clipAutoCorrectionAt(timing, autoAlign = project.autoAlign, autoAmount = project.autoAmount) {
+  const c = timing?.clip;
+  if (!c) return { bright: 0, temp: 0, handoff: 1 };
+  const amount = autoAmountOf(autoAmount);
+  const ownBright = (c.autoBright || 0) * (autoAlign ? amount : 0);
+  const ownTemp = (c.autoTemp || 0) * (autoAlign ? amount : 0);
+  if (!autoAlign || !timing.clipIndex || timing.clipLocalTime >= AUTO_HANDOFF_SEC)
+    return { bright: (c.bright || 0) + ownBright, temp: (c.temp || 0) + ownTemp, handoff: 1 };
+  const prev = project.clips[timing.clipIndex - 1];
+  const x = clamp(timing.clipLocalTime / AUTO_HANDOFF_SEC, 0, 1);
+  const eased = x * x * (3 - 2 * x);
+  const prevBright = (prev?.autoBright || 0) * amount;
+  const prevTemp = (prev?.autoTemp || 0) * amount;
+  return {
+    bright: (c.bright || 0) + prevBright + (ownBright - prevBright) * eased,
+    temp: (c.temp || 0) + prevTemp + (ownTemp - prevTemp) * eased,
+    handoff: eased,
+  };
+}
 // 質感は作品全体で1本のフィルムとして共通。クリップごとに変えられるのは「どれだけ乗せるか」だけ。
 // 粒子の性格・コマ送り・色は動かさないので、カットが混ざってもフィルムの一貫性は保たれる。
 function clipFxScaleOf(c) { const v = c?.fxScale; return v == null ? 1 : clamp(v, 0, 1); }
@@ -1174,10 +1628,10 @@ class GLPipe {
       this._programs.push(result);
       return result;
     };
-    this.grade = prog(FS_GRADE, ['uFrame','uLut','uStrength','uExposure','uContrast','uSaturation','uFade','uTemp','uLutN','uTime','uWeave','uJump','uHandheld','uHandheldHz','uSpliceY','uSeedPhase','uLinearOptics','uHighlightCarry','uStockContrast','uStockSaturation','uStockBlackLift','uStockShoulder','uStockShadowTint','uStockHighlightTint','uRot','uVis',
-      'uCorrOn','uCurveAN','uCurveBN','uHslA[0]','uHslB[0]','uCurveA[0]','uCurveB[0]']);
+    this.grade = prog(FS_GRADE, ['uFrame','uLut','uStrength','uExposure','uContrast','uSaturation','uFade','uTemp','uTint','uVibrance','uHighlights','uShadows','uWhites','uBlacks','uHighlightGrade','uShadowGrade','uMidtoneGrade','uLutN','uTime','uWeave','uJump','uHandheld','uHandheldHz','uHandheldRest','uSpliceY','uAiruMove','uAiruScale','uSeedPhase','uLinearOptics','uHighlightCarry','uStockContrast','uStockSaturation','uStockBlackLift','uStockShoulder','uHakumeiRolloff','uStockOn','uHighlightDesat','uShadowBlueToCyan','uBlueFade','uPrev','uShutter','uStockShadowTint','uStockHighlightTint','uRot','uVis',
+      'uCorrOn','uCurveAN','uCurveBN','uSkinProtection','uVisualReferenceC','uHslA[0]','uHslB[0]','uCurveA[0]','uCurveB[0]']);
     this.blur = prog(FS_BLUR, ['uTex','uDir','uThresh','uFirst']);
-    this.final = prog(FS_FINAL, ['uBase','uBloom','uBloomWide','uGrainTex','uBloomAmt','uWideAmt','uHalation','uVeil','uLetterbox','uVignette','uVigA','uEndAmt','uEndDark','uFlicker','uDust','uScratch','uGrain','uGrainScale','uTime','uGrainOfs','uGrainCurve','uSoften','uChroma','uDamage','uSeedPhase','uLeak','uTransKind','uTransAmt','uTransPhase','uTransGrad','uTransSeed','uTransTint','uTransDir','uLinearOptics','uTexel','uHaloColor','uVisF']);
+    this.final = prog(FS_FINAL, ['uBase','uBloom','uBloomWide','uGrainTex','uBloomAmt','uWideAmt','uHalation','uVeil','uLetterbox','uVignette','uVigA','uEndAmt','uEndDark','uFlicker','uDust','uScratch','uGrain','uGrainScale','uTime','uGrainOfs','uGrainCurve','uSoften','uSoftRadius','uLeakCool','uHardnessReduce','uChroma','uDamage','uSeedPhase','uLeak','uTransKind','uTransAmt','uTransPhase','uTransWrap','uOverOn','uOverFloor','uOverFar','uOverCast','uTransGrad','uTransSeed','uTransTint','uTransDir','uLinearOptics','uTexel','uHaloColor','uVisF']);
     this.probe = prog(FS_PROBE, []);
     // テキストだけ頂点シェーダが違う（板ポリを任意の位置へ置くため）
     {
@@ -1187,7 +1641,7 @@ class GLPipe {
       gl.linkProgram(p);
       if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('リンク: ' + gl.getProgramInfoLog(p));
       const u = {};
-      for (const n of ['uTex', 'uRect', 'uAlpha', 'uToLinear', 'uReveal', 'uTime', 'uSeedPhase', 'uWeave', 'uJump', 'uHandheld', 'uHandheldHz', 'uSpliceY', 'uVis', 'uTextRot', 'uTextAspect'])
+      for (const n of ['uTex', 'uRect', 'uAlpha', 'uToLinear', 'uReveal', 'uTime', 'uSeedPhase', 'uWeave', 'uJump', 'uHandheld', 'uHandheldHz', 'uHandheldRest', 'uSpliceY', 'uAiruMove', 'uAiruScale', 'uVis', 'uTextRot', 'uTextAspect'])
         u[n] = gl.getUniformLocation(p, n);
       this.text = { prog: p, u };
       this._programs.push(this.text);
@@ -1196,6 +1650,7 @@ class GLPipe {
     gl.useProgram(this.grade.prog);
     gl.uniform1i(this.grade.u.uFrame, 0);
     gl.uniform1i(this.grade.u.uLut, 1);
+    gl.uniform1i(this.grade.u.uPrev, 7);
     gl.useProgram(this.blur.prog);
     gl.uniform1i(this.blur.u.uTex, 2);
     gl.useProgram(this.final.prog);
@@ -1272,7 +1727,7 @@ class GLPipe {
     if (kind === 'rgba16f' && !gl.getExtension('EXT_color_buffer_float')) throw new Error('EXT_color_buffer_floatが使えません');
     this._deleteIntermediates();
     const bw = Math.max(2, w >> 3), bh = Math.max(2, h >> 3);
-    const sizes = [[w, h], [bw, bh], [bw, bh], [bw, bh]];
+    const sizes = [[w, h], [bw, bh], [bw, bh], [bw, bh], [w, h]];   // 5番目: 直前フレーム（シャッター残像用）
     const internal = kind === 'rgba16f' ? gl.RGBA16F : gl.RGBA8;
     const type = kind === 'rgba16f' ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
     const textures = [], fbos = [];
@@ -1355,6 +1810,39 @@ class GLPipe {
       bmp.close();
     }
   }
+  // 比較専用の入力指紋。_uploadFrame() が C2 の入力として frameTex へ載せた**同じ**RGBAを
+  // そのまま readPixels する。別canvas／別の動画取得で採った画を入力と取り違えないため、
+  // 通常描画では呼ばず、比較の captureInput 指定時だけに限定する。
+  _captureUploadedFrame(srcW, srcH) {
+    const gl = this.gl;
+    const width = Math.max(1, Math.floor(srcW));
+    const height = Math.max(1, Math.floor(srcH));
+    const fbo = gl.createFramebuffer();
+    if (!fbo) throw new Error('入力指紋用Framebufferを作れませんでした');
+    try {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.frameTex, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE)
+        throw new Error('C2入力textureを読み出せませんでした');
+      const pixels = new Uint8Array(width * height * 4);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      const err = gl.getError();
+      if (err !== gl.NO_ERROR) throw new Error(`C2入力textureの読み出しに失敗しました (${err})`);
+      return {
+        pixels, width, height,
+        pixelFormat: 'RGBA / UNSIGNED_BYTE (WebGL2 frameTex)',
+        orientation: 'WebGL readPixels bottom-left origin',
+        drawingBufferColorSpace: gl.drawingBufferColorSpace || null,
+        unpackColorSpace: gl.unpackColorSpace || null,
+        proof: 'same frameTex uploaded by _uploadFrame and sampled by FS_GRADE/C2',
+      };
+    } finally {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.deleteFramebuffer(fbo);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
+    }
+  }
   // 焼き込みテキストをfboAへ混ぜる。texturesはbounding box単位の小さなものだけ持つ
   _drawTexts(items, ow, oh, o) {
     const gl = this.gl;
@@ -1371,8 +1859,11 @@ class GLPipe {
     gl.uniform1f(u.uTime, o.time); gl.uniform1f(u.uSeedPhase, o.seedPhase);
     gl.uniform1f(u.uWeave, o.weave); gl.uniform1f(u.uJump, o.jump);
     gl.uniform1f(u.uHandheld, o.handheld || 0);
-    gl.uniform1f(u.uHandheldHz, Math.min(o.handheldHz || 24, 19));
+    gl.uniform1f(u.uHandheldHz, o.handheldHz || 19);
+    gl.uniform1f(u.uHandheldRest, o.handheldRest || 0);
     gl.uniform1f(u.uSpliceY, o.spliceY || 0);
+    gl.uniform2f(u.uAiruMove, o.airuMove?.[0] || 0, o.airuMove?.[1] || 0);
+    gl.uniform1f(u.uAiruScale, o.airuScale || 1);
     gl.uniform2f(u.uVis, o.vis[0], o.vis[1]);
     gl.uniform1f(u.uToLinear, o.toLinear);
     gl.enable(gl.BLEND);
@@ -1399,12 +1890,13 @@ class GLPipe {
     // 長押し中は「調整前」。色・質感・クリップ補正を全部外し、画づくりだけ（レターボックス）は保つ
     if (renderOptions.bypassLook) {
       renderOptions = { ...renderOptions, bypassClip: true, lut: 'none', filmProfile: project.filmProfile,
+        visualReferenceC: 0,
         adjust: { exposure: 0, contrast: 0, saturation: 0, fade: 0, grain: 0, grainSize: 1, glow: 0,
           halation: 0, damage: 0, strength: 0, effect: 0, handheld: 0, leak: 0, trans: 0, judder: 0, letterbox: project.adjust.letterbox } };
     }
     const a = renderOptions.adjust || project.adjust;
     // サムネイルの試し描きでは、作品の状態を書き換えずにここだけ差し替える
-    const profileKey = renderOptions.filmProfile, lutName = renderOptions.lut ?? project.lut;
+    const profileKey = renderOptions.filmProfile || project.filmProfile, lutName = renderOptions.lut ?? project.lut;
     const fx = textureFx(a.effect, profileKey);
     const profile = currentFilmProfile(profileKey);
     const r = this._intermediate;
@@ -1415,6 +1907,8 @@ class GLPipe {
     const seed = normalizeTextureSeed(project.textureSeed, project);
     const time = Number.isFinite(effectTime) ? effectTime : 0;
     const isFilm = a.effect === 2;
+    // 青い記憶v2は効果1と同じencoded空間の光学系を使う（profile.linearOptics=0）。他のフィルムは従来どおりlinear。
+    const linearOptics = isFilm && (profile.linearOptics ?? 1) ? 1 : 0;
     const seedPhase = textureSeedUnit(seed, 0, 0x51ed270b);
     this._uploadGrain(seed);
     this._clearGlErrors();
@@ -1442,56 +1936,127 @@ class GLPipe {
     const fs = noClip ? 1 : clipFxScaleOf(clip);
     // ハイキー（クリップ単位）。露出・彩度・ソフトを一度に動かすので、ここで係数を作っておく
     const hk = noClip ? 0 : clipHighKeyOf(clip);
-    gl.uniform1f(u.uExposure, a.exposure + (noClip ? 0 : clipBrightOf(clip)) + hk * 1.2);
-    gl.uniform1f(u.uTemp, noClip ? 0 : clipTempOf(clip));
+    const autoAlign = renderOptions.autoAlignOverride === undefined ? project.autoAlign : renderOptions.autoAlignOverride;
+    const clipCorrection = !noClip && renderOptions.clipCorrection;
+    const clipBright = clipCorrection?.bright ?? clipBrightOf(clip, autoAlign);
+    const clipTemp = clipCorrection?.temp ?? clipTempOf(clip, autoAlign);
+    const breath = hakumeiFilmBreathAt(renderOptions.filmBreathTimelineTime ?? time, a, profileKey, seed);
+    const harmony = (!noClip && renderOptions.harmony) || { exposure: 0, temperature: 0 };
+    const style = (!noClip && isFilm && renderOptions.style) || null;
+    gl.uniform1f(u.uExposure, a.exposure + (noClip ? 0 : clipBright) + hk * 1.2 + breath.exposure + harmony.exposure + (style?.exposure || 0));
+    gl.uniform1f(u.uTemp, (a.temperature || 0) + (noClip ? 0 : clipTemp) + breath.temperature + harmony.temperature);
+    gl.uniform1f(u.uTint, a.tint || 0);
+    gl.uniform1f(u.uVibrance, a.vibrance || 0);
+    gl.uniform1f(u.uHighlights, a.highlights || 0);
+    gl.uniform1f(u.uShadows, a.shadows || 0);
+    gl.uniform1f(u.uWhites, a.whites || 0);
+    gl.uniform1f(u.uBlacks, a.blacks || 0);
+    gl.uniform3f(u.uHighlightGrade, a.highlightHue || 0, a.highlightSat || 0, a.highlightAmount || 0);
+    gl.uniform3f(u.uShadowGrade, a.shadowHue || 0, a.shadowSat || 0, a.shadowAmount || 0);
+    gl.uniform3f(u.uMidtoneGrade, a.midtoneHue || 0, a.midtoneSat || 0, a.midtoneAmount || 0);
     // HSL・カーブ。クリップ側→作品側の順に通す。全部ゼロなら分岐ごと飛ばす
     const corrAdjust = renderOptions.adjust || project.adjust;
     const corrClip = noClip ? null : clip;
-    const corrOn = !noClip && hasCorrection(corrClip, corrAdjust) ? 1 : 0;
+    const corrHsl = renderOptions.hslOverride || hslOf(corrAdjust);
+    // 目視基準Cは 0=V1、1=C2現状、2=C2緑を静める、3=C2黄色ハイライト調整、4=写真基準の黄／青緑分離。
+    // 明示値を優先し、未指定だけprofileから補う。
+    const visualReferenceMode = renderOptions.visualReferenceC !== undefined
+      ? clamp(Number(renderOptions.visualReferenceC) || 0, 0, 4)
+      : (a.effect === 2 && profileKey === 'hakumei-v2' ? 1 : 0);
+    const corrOn = !noClip && (hasCorrection(corrClip, corrAdjust) || !isIdentityHsl(corrHsl)) ? 1 : 0;
     gl.uniform1f(u.uCorrOn, corrOn);
+    gl.uniform1f(u.uSkinProtection, renderOptions.skinProtection || 0);
+    gl.uniform1f(u.uVisualReferenceC, visualReferenceMode);
     if (corrOn) {
       const ca = curveToArray(curveOf(corrClip)), cb = curveToArray(corrAdjust.curve);
       gl.uniform3fv(u['uHslA[0]'], hslToArray(hslOf(corrClip)));
-      gl.uniform3fv(u['uHslB[0]'], hslToArray(corrAdjust.hsl));
+      gl.uniform3fv(u['uHslB[0]'], hslToArray(corrHsl));
       gl.uniform2fv(u['uCurveA[0]'], ca.data);
       gl.uniform2fv(u['uCurveB[0]'], cb.data);
       gl.uniform1f(u.uCurveAN, ca.n);
       gl.uniform1f(u.uCurveBN, cb.n);
     }
-    gl.uniform1f(u.uContrast, a.contrast);
+    gl.uniform1f(u.uContrast, a.contrast + breath.contrast);
     // ハイキーの彩度: MV実測でハイキーカットの彩度は通常の2〜83%（明るいほど落ちる）。-0.35で中庸に合わせる
     gl.uniform1f(u.uSaturation, a.saturation - hk * 0.35);
     gl.uniform1f(u.uFade, a.fade);
     gl.uniform1f(u.uTime, time % 100000);
     gl.uniform1f(u.uWeave, (fx.weave || 0) * (noClip ? 1 : clipFxScaleOf(clip)));
     gl.uniform1f(u.uJump, (fx.jump || 0) * (noClip ? 1 : clipFxScaleOf(clip)));
-    // 手ブレは作品ぜんたいの値。質感と同じくクリップの「質感の強さ」に従う
-    const handheld = (a.handheld || 0) * fs;
+    // 薄明v2の通常描画は元Airu実軌跡を使わない（HKR-006 2026-09-16: 目視で地震のように見えたため外した）。
+    // 実軌跡バンクは開発比較URLだけに残す。airuMotionが無ければ通常のproject.adjust.handheld（v2既定0）を使う。
+    const airuMotion = renderOptions.airuMotion;
+    const movementPreview = isFilm ? hakumeiMovementPreviewHandheld(profileKey, noClip ? null : clip?.id) : null;
+    // カット別手ブレゲート（profile.motionGate）。薄明v2はスライダー0のとき静止0.25／動き0.10、青い記憶v2はスライダー値を静止側に使う。
+    const gateHandheld = !noClip && isFilm && movementPreview === null ? profileMotionGateHandheld(profile, clip, a.handheld || 0) : null;
+    const handheld = airuMotion ? 0 : (movementPreview !== null ? movementPreview : gateHandheld !== null ? gateHandheld : (a.handheld || 0)) * fs;
     gl.uniform1f(u.uHandheld, handheld);
     // MVの実効フレームレートは約19fps（複製フレーム21.7%）。8mmは16fpsのまま
-    gl.uniform1f(u.uHandheldHz, Math.min(fx.hz || 24, 19));
+    // 時間格子の一本化（HKR-008 時間設計1）: 青い記憶v2で有効なら、手ブレの量子化をコマ保持の格子（base fps）に揃える
+    const gridHz = isFilm && aoiTimeGridUnified(profile) && profile.cadenceHold ? profile.cadenceHold.base : Math.min(fx.hz || 24, 19);
+    gl.uniform1f(u.uHandheldHz, gridHz);
+    // 手ブレの止まり（HKR-008 時間設計3）: seedで決めた区間だけ手ブレの時刻を止める（位置はその場で保持され、明けに続きから動く）
+    const handheldRest = isFilm && handheld > 0 ? aoiHandheldRestShift(profile, time, seed) : 0;
+    gl.uniform1f(u.uHandheldRest, handheldRest);
+    gl.uniform2f(u.uAiruMove, airuMotion?.move?.[0] || 0, airuMotion?.move?.[1] || 0);
+    gl.uniform1f(u.uAiruScale, airuMotion?.scale || 1);
     if (DEV_TRACE && renderOptions.spliceY) trace('splice.render', () => ({ y: +renderOptions.spliceY.toFixed(4) }));
     gl.uniform1f(u.uSpliceY, renderOptions.bypassLook ? 0 : (renderOptions.spliceY || 0));
     gl.uniform1f(u.uSeedPhase, seedPhase);
-    gl.uniform1f(u.uLinearOptics, isFilm ? 1 : 0);
-    gl.uniform1f(u.uStockContrast, isFilm ? profile.stockContrast : 0);
-    gl.uniform1f(u.uStockSaturation, isFilm ? profile.stockSaturation : 0);
-    gl.uniform1f(u.uStockBlackLift, isFilm ? profile.blackLift : 0);
-    gl.uniform1f(u.uStockShoulder, isFilm ? profile.shoulder : 0);
-    gl.uniform3fv(u.uStockShadowTint, isFilm ? profile.shadowTint : [0, 0, 0]);
-    gl.uniform3fv(u.uStockHighlightTint, isFilm ? profile.highlightTint : [0, 0, 0]);
+    gl.uniform1f(u.uLinearOptics, linearOptics);
+    const stockBase = isFilm ? profileStockTone(profile) : null;
+    const stock = stockBase && style ? { ...stockBase, blackLift: stockBase.blackLift + style.blackLift, stockContrast: stockBase.stockContrast + style.contrast, stockSaturation: stockBase.stockSaturation + style.saturation } : stockBase;
+    const stockOn = !!stock && (stock.stockContrast || stock.stockSaturation || stock.blackLift || stock.shoulder || stock.highlightDesat || stock.shadowBlueToCyan || stock.blueFade
+      || stock.shadowTint.some(v => v) || stock.highlightTint.some(v => v));
+    gl.uniform1f(u.uStockOn, stockOn ? 1 : 0);
+    gl.uniform1f(u.uHighlightDesat, stock ? stock.highlightDesat || 0 : 0);
+    gl.uniform1f(u.uShadowBlueToCyan, stock ? stock.shadowBlueToCyan || 0 : 0);
+    gl.uniform1f(u.uBlueFade, stock ? stock.blueFade || 0 : 0);
+    gl.uniform1f(u.uStockContrast, stock ? stock.stockContrast : 0);
+    gl.uniform1f(u.uStockSaturation, stock ? stock.stockSaturation : 0);
+    gl.uniform1f(u.uStockBlackLift, stock ? stock.blackLift : 0);
+    gl.uniform1f(u.uStockShoulder, stock ? stock.shoulder : 0);
+    const explicitHakumeiRolloff = Number(renderOptions.hakumeiRolloff);
+    const profileHakumeiRolloff = Number(profile.rolloff);
+    const hakumeiRolloff = Number.isFinite(explicitHakumeiRolloff)
+      ? explicitHakumeiRolloff : (Number.isFinite(profileHakumeiRolloff) ? profileHakumeiRolloff : 0);
+    gl.uniform1f(u.uHakumeiRolloff, clamp(hakumeiRolloff, 0, 1));
+    gl.uniform3fv(u.uStockShadowTint, stock ? stock.shadowTint : [0, 0, 0]);
+    gl.uniform3fv(u.uStockHighlightTint, stock ? stock.highlightTint : [0, 0, 0]);
     // RGBA8 fallbackはlinear演算を保つが、明部のfloat headroomを持ち越さない。
     gl.uniform1f(u.uHighlightCarry, isFilm && r.kind === 'rgba16f' ? profile.highlightCarry : 0);
+    // シャッターの残像（5-4）: 同じクリップの連続フレーム（0 < Δt ≤ 2.5/30秒）のときだけ直前フレームと混ぜる。
+    let shutter = isFilm && !noClip ? aoiShutterBlend(profile) : 0;
+    // 動き量に比例する残像（HKR-008 時間設計2）: 素材の隣接フレーム差（frameStep）で 0.15〜0.50 に散らす
+    const motionMode = shutter > 0 ? aoiMotionShutter(profile) : null;
+    if (motionMode) {
+      const m = clip?.kind === 'photo' ? 0 : (clip?.frameStep?.median ?? 0.03);
+      const range = motionMode === 'weak' ? [0.12, 0.32] : [0.15, 0.50];
+      shutter = range[0] + clamp((m - 0.01) / 0.05, 0, 1) * (range[1] - range[0]);
+    }
+    const sameClip = shutter > 0 && this._prevFrame && this._prevFrame.clipId === clip?.id;
+    const dt = sameClip ? time - this._prevFrame.time : -1;
+    // 保持コマ（Δt=0）は直前の出力をそのまま出す（残像を混ぜた結果を保持する）。連続フレームは shutter の割合で混ぜる。
+    const shutterNow = !sameClip ? 0 : Math.abs(dt) <= 1e-4 ? 1 : (dt > 0 && dt <= 2.5 / 30) ? shutter : 0;
+    const prevTex = r.textures[4];
+    gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, prevTex); gl.activeTexture(gl.TEXTURE0);
+    gl.uniform1f(u.uShutter, shutterNow);
     gl.bindFramebuffer(gl.FRAMEBUFFER, fboA);
     gl.viewport(0, 0, ow, oh);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (shutter > 0) {
+      gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, prevTex);
+      gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, ow, oh);
+      gl.activeTexture(gl.TEXTURE0);
+      this._prevFrame = { clipId: clip?.id, time };
+    } else this._prevFrame = null;
 
     // 焼き込みテキスト: ここで混ぜると、このあとの滲み・粒子・明滅・傷を映像と一緒に浴びる
     const burnTexts = renderOptions.bypassLook ? [] : (renderOptions.texts || []).filter(x => x.t.burnIn);
     if (burnTexts.length) {
       this._drawTexts(burnTexts, ow, oh, {
-        toLinear: isFilm ? 1 : 0,
-        time: time % 100000, seedPhase, weave: (fx.weave || 0) * fs, jump: (fx.jump || 0) * fs, handheld, handheldHz: fx.hz || 24, spliceY: renderOptions.bypassLook ? 0 : (renderOptions.spliceY || 0), vis,
+        toLinear: linearOptics,
+        time: time % 100000, seedPhase, weave: (fx.weave || 0) * fs, jump: (fx.jump || 0) * fs, handheld, handheldHz: gridHz, handheldRest, spliceY: renderOptions.bypassLook ? 0 : (renderOptions.spliceY || 0), airuMove: airuMotion?.move, airuScale: airuMotion?.scale || 1, vis,
       });
     }
 
@@ -1543,7 +2108,8 @@ class GLPipe {
       ? (1 + tr0.amt * (1.2 + 3.0 * Math.max(0, (tr0.phase - 0.45) / 0.55))) : 1;
     // fs = このクリップに質感をどれだけ乗せるか（0〜1）。粒子の性格・コマ送り・色・レターボックスは変えない
     gl.uniform1f(f.uBloomAmt, fx.bloom * a.glow * fs * trBoost);
-    gl.uniform1f(f.uWideAmt, fx.wide * a.glow * fs * trBoost);
+    // 目視基準Cは既存の広いブルームだけを少し強める。全体ぼかしや粒子は増やさない。
+    gl.uniform1f(f.uWideAmt, fx.wide * a.glow * fs * trBoost * (visualReferenceMode > 0.5 ? 1.14 : 1));
     gl.uniform1f(f.uHalation, useGlow ? a.halation * fs : 0);
     gl.uniform1f(f.uVeil, (fx.veil || 0) * fs);
     gl.uniform1f(f.uLetterbox, a.letterbox ? 0.11 : 0);
@@ -1556,20 +2122,36 @@ class GLPipe {
     gl.uniform1f(f.uFlicker, (fx.flicker || 0) * fs);
     gl.uniform1f(f.uDust, (fx.dust || 0) * fs);
     gl.uniform1f(f.uScratch, (fx.scratch || 0) * fs);
-    gl.uniform1f(f.uGrain, a.grain * fs);
+    const soft = isFilm ? aoiSoftOverride(profile) : null;
+    gl.uniform1f(f.uGrain, (soft?.grain ?? a.grain) * fs);
     // 物理pxを出力高さへ比例させ、540p previewと1080p exportの相対粒径を揃える。
-    gl.uniform1f(f.uGrainScale, Math.max(0.5, a.grainSize) * (oh / 1080));
+    gl.uniform1f(f.uGrainScale, Math.max(0.5, soft?.grainSize ?? a.grainSize) * (oh / 1080));
     gl.uniform1f(f.uGrainCurve, fx.curve || 0);
-    gl.uniform1f(f.uSoften, (fx.soften || 0) * fs + hk * 0.3);
+    const explicitHardnessReduce = Number(renderOptions.hardnessReduce);
+    const profileHardnessReduce = Number(profile.hardnessReduce);
+    const hardnessReduce = Number.isFinite(explicitHardnessReduce)
+      ? explicitHardnessReduce
+      : (isFilm && Number.isFinite(profileHardnessReduce) ? profileHardnessReduce : 0);
+    const hardnessReduceCap = 0.4;
+    gl.uniform1f(f.uHardnessReduce, Number.isFinite(hardnessReduce) ? clamp(hardnessReduce, 0, hardnessReduceCap) : 0);
+    gl.uniform1f(f.uSoften, (soft?.soften ?? fx.soften ?? 0) * fs + hk * 0.3);
+    gl.uniform1f(f.uSoftRadius, soft?.softRadius ?? profile.softRadius ?? 1);
+    gl.uniform1f(f.uLeakCool, isFilm && aoiLeakCool(profile) ? 1 : 0);
     gl.uniform1f(f.uChroma, (fx.chroma || 0) * fs);
     gl.uniform1f(f.uDamage, isFilm ? a.damage * fs : 0);
     // 感光は8mm以外（自分の色・青い記憶）でも使える。アイルMVにも感光カットがある
-    gl.uniform1f(f.uLeak, (a.leak || 0) * fs);
+    // 比較用: `hkr008LeakForce=1` で光漏れを強さ1.0（出現率90%）にして色の違いを見えるようにする（通常は不変）。
+    gl.uniform1f(f.uLeak, (isFilm && profile.mvLook && new URLSearchParams(location.search).get('hkr008LeakForce') === '1' && location.search.includes('dev') ? 1.0 : (a.leak || 0)) * fs);
     // つなぎは境界の現象なので、クリップの質感の強さでは薄めない（カット2つにまたがるため）
     const tr = renderOptions.bypassLook ? null : renderOptions.trans;
     gl.uniform1i(f.uTransKind, tr ? tr.kind : 0);
     gl.uniform1f(f.uTransAmt, tr ? tr.amt : 0);
     gl.uniform1f(f.uTransPhase, tr ? tr.phase : 0);
+    gl.uniform1f(f.uTransWrap, tr && isFilm ? aoiTransWrap(profile) : 0);
+    gl.uniform1f(f.uOverOn, tr?.over ? 1 : 0);
+    gl.uniform3fv(f.uOverFloor, tr?.over ? tr.over.floor : [1, 1, 1]);
+    gl.uniform1f(f.uOverFar, tr?.over ? tr.over.far : 0);
+    gl.uniform3fv(f.uOverCast, tr?.over ? tr.over.cast : [1, 1, 1]);
     gl.uniform1f(f.uTransGrad, tr?.face ? tr.face.grad : 0);
     gl.uniform1f(f.uTransSeed, tr?.face ? tr.face.seed : 0);
     // uTransTint は「符号＝色の系統（+琥珀 / −青緑）」「絶対値＝回復側の色被りの強さ」を兼ねる。
@@ -1579,8 +2161,13 @@ class GLPipe {
       : 1);
     gl.uniform2f(f.uTransDir, tr?.face ? tr.face.dir[0] : 0, tr?.face ? tr.face.dir[1] : 0);
     gl.uniform1f(f.uSeedPhase, seedPhase);
-    gl.uniform1f(f.uLinearOptics, isFilm ? 1 : 0);
-    gl.uniform2f(f.uTexel, 1.4 / ow, 1.4 / oh);
+    gl.uniform1f(f.uLinearOptics, linearOptics);
+    // 硬さ低減の近傍半径は、プレビュー／1080p書き出しで同じ完成寸法に換算する。
+    // 単に1.4pxを読むと、半分のプレビューでは完成映像の2倍広い範囲を混ぜてしまい、
+    // プレビューだけ柔らかく見える。各アスペクトの1080p出力を基準に縮尺をそろえる。
+    const [referenceW, referenceH] = ASPECTS[project.aspect]?.out1080 || [ow, oh];
+    const hardnessTexelScale = Math.min(ow / referenceW, oh / referenceH);
+    gl.uniform2f(f.uTexel, 1.4 * hardnessTexelScale / ow, 1.4 * hardnessTexelScale / oh);
     gl.uniform2f(f.uVisF, vis[0], vis[1]);
     gl.uniform3f(f.uHaloColor, fx.halo[0], fx.halo[1], fx.halo[2]);
     // 粒子はフィルムに焼き付いているので、コマごとに1回だけ更新する
@@ -1607,6 +2194,8 @@ class GLPipe {
     if (this.contextLost) throw new Error('WebGL描画の復帰待ちです');
     const ow = this.cv.width, oh = this.cv.height;
     await this._uploadFrame(source);
+    this.lastUploadedFrameCapture = renderOptions.captureInput
+      ? this._captureUploadedFrame(srcW, srcH) : null;
     this._ensureIntermediates(ow, oh);
     try {
       this._render(srcW, srcH, rot, effectTime, clip, renderOptions);
@@ -1657,7 +2246,14 @@ function applyLutSelection(pipe) {
 // 書き出しと同じGLパイプを通すので、カードに映るのは本当に出る絵。
 // 専用pipeを1つだけ持ち回す（毎回作ると _probeFramebuffers の再確保で重い）。
 let thumbPipe = null, thumbTimer = 0, thumbBusy = false;
-const THUMB_PX = 64;
+function ensureThumbPipe() {
+  if (!thumbPipe) { const cv = document.createElement('canvas'); cv.width = THUMB_PX; cv.height = THUMB_PX; thumbPipe = new GLPipe(cv); }
+  return thumbPipe;
+}
+// ホーム「このごろ」に出す作品サムネイル（id → dataURL）。projectMeta の thumb に保存し、起動時に読み戻す
+const projectThumbs = new Map();
+const THUMB_PX = 96;
+let screenLookDraft = null, screenLookCompareHeld = false;
 function lutDataFor(name) {
   if (name === 'mine') return project.mineLutData;
   if (name === 'airu') return project.airuLutData;
@@ -1667,8 +2263,8 @@ function lutDataFor(name) {
   return makeHikariLut();
 }
 // プリセットを当てたときの adjust を、作品を書き換えずに組み立てる（applyPreset と同じ規則）
-function presetAdjust(p) {
-  const a = { ...project.adjust, effect: p.effect, letterbox: p.letterbox };
+function presetAdjust(p, base = project.adjust) {
+  const a = { ...base, effect: p.effect, letterbox: p.letterbox };
   // 完成イメージを選んだら「動き」もその作品らしい値で入る（理念: 選べば完成形）。
   // 既存作品を開いたときには通らない経路なので、勝手に揺れ始めることはない
   const m = MOTION_RECOMMEND[p.key];
@@ -1681,36 +2277,51 @@ function presetAdjust(p) {
     a.grain = FX[p.effect].gAmt / 400; a.grainSize = FX[p.effect].gSize / 100;
     a.glow = FX[p.effect].gGlow / 100; a.halation = FX[p.effect].gHal / 100; a.damage = 0;
   }
+  if (p.adjust) Object.assign(a, p.adjust);
   return a;
+}
+function currentPreviewOptions() {
+  if (bypassLook) return { renderOptions: { bypassLook: true } };
+  const name = screenLookCompareHeld ? null : screenLookDraft;
+  const p = name && PRESETS[name];
+  if (!p) { applyLutSelection(preview); return {}; }
+  const lut = lutDataFor(p.lut);
+  if (lut) preview.setLut(lut);
+  // presetDraft: 適用（applyPreset）は境目の手動指定を白紙にするので、試写も同じ前提で描く（HKR-008 段階0）。
+  return { renderOptions: { adjust: { ...presetAdjust(p), presetDraft: true }, lut: p.lut, filmProfile: p.filmProfile || 'home8' } };
 }
 // 再生ヘッドが止まってから150msでまとめて更新する（スクラブ中に毎フレーム描かない）
 function scheduleThumbs() {
   clearTimeout(thumbTimer);
+  // Look選択を開いていない間の候補サムネイルは画面に出ない。ホームから
+  // プレビューを開いた直後に全候補を描くと実機で200ms超の詰まりになり、
+  // 完成映像の最初の表示を乱してしまう。
+  if (!document.body.classList.contains('look-overlay-open')) return;
   thumbTimer = setTimeout(() => { void renderPresetThumbs(); }, 150);
 }
 async function renderPresetThumbs() {
   // 再生中・書き出し中・素材なしでは描かない（プレビューの邪魔をしない）
-  if (thumbBusy || playing || exporting || !project.clips.length) return;
-  const timing = getTimelineRenderTiming(timelinePos);
-  if (!timing || !clipReady(timing.clip)) return;
+  if (!document.body.classList.contains('look-overlay-open') || thumbBusy || playing || exporting || !project.clips.length) return;
+  const appliedTiming = getTimelineRenderTiming(timelinePos);
+  if (!appliedTiming || !clipReady(appliedTiming.clip)) return;
   thumbBusy = true;
   const t0 = performance.now();
   try {
-    if (!thumbPipe) {
-      const cv = document.createElement('canvas');
-      cv.width = THUMB_PX; cv.height = THUMB_PX;
-      thumbPipe = new GLPipe(cv);
-    }
-    const source = clipSource(timing.clip);
-    for (const card of document.querySelectorAll('#lookPresets .card')) {
+    ensureThumbPipe();
+    for (const card of document.querySelectorAll('#lookPresets .card, #screenLookCards .lookCard')) {
       const p = PRESETS[card.dataset.preset];
       const lut = lutDataFor(p.lut);
       if (!lut) continue;
+      const renderOptions = { adjust: { ...presetAdjust(p), letterbox: false }, lut: p.lut, fit: 'cover',
+        filmProfile: p.filmProfile || 'home8' };
+      const timing = getTimelineRenderTiming(timelinePos, renderOptions);
+      if (!timing || !clipReady(timing.clip)) continue;
+      if (timing.clip.kind === 'video' && Math.abs(timing.clip.video.currentTime - timing.localSourceTime) > 0.001)
+        await seekTo(timing.clip.video, timing.localSourceTime);
       thumbPipe.setLut(lut);
-      await thumbPipe.draw(source, timing.clip.w, timing.clip.h, 0, timing.effectTime, timing.clip,
+      await thumbPipe.draw(clipSource(timing.clip), timing.clip.w, timing.clip.h, 0, timing.effectTime, timing.clip,
         // 64pxの正方形なので、帯を出さず絵で埋める（見比べる面積を優先）
-        { adjust: { ...presetAdjust(p), letterbox: false }, lut: p.lut, fit: 'cover',
-          filmProfile: p.filmProfile || 'home8' });
+        renderOptions);
       let out = card.querySelector('canvas.th');
       if (!out) {
         out = document.createElement('canvas');
@@ -1720,6 +2331,8 @@ async function renderPresetThumbs() {
       // toDataURL は同期の読み戻しで重い。canvas 同士の drawImage で転写する
       out.getContext('2d').drawImage(thumbPipe.cv, 0, 0, THUMB_PX, THUMB_PX);
     }
+    if (appliedTiming.clip.kind === 'video' && Math.abs(appliedTiming.clip.video.currentTime - appliedTiming.localSourceTime) > 0.001)
+      await seekTo(appliedTiming.clip.video, appliedTiming.localSourceTime);
     trace('thumbs', () => ({ ms: Math.round(performance.now() - t0), T: +timelinePos.toFixed(2) }));
   } catch (e) { /* サムネイルの失敗で編集を止めない */ }
   finally { thumbBusy = false; }
@@ -1744,6 +2357,7 @@ const DB_VERSION = 2;
 const WORKSPACE_KEY = 'workspace';
 let dbP = null, ready = false, saveTimer = 0;
 let saveGeneration = 0, savedGeneration = 0, saveStatus = 'saved';
+let screenRandomizeUndoSeed = null;
 let failNextSaveForTest = false;
 let failNextTransactionForTest = false;
 const pendingFileWrites = new Map();
@@ -1810,6 +2424,8 @@ function updateSaveUI() {
   const el = $('saveStatus');
   el.textContent = labels[saveStatus] || labels.saved;
   el.classList.toggle('error', saveStatus === 'error');
+  document.querySelectorAll('.saveStatusMirror').forEach(m => { m.textContent = el.textContent; m.classList.toggle('error', saveStatus === 'error'); });
+  const sb = $('screenSaveBtn'); if (sb) { sb.classList.toggle('dirty', saveStatus === 'dirty' || saveStatus === 'error'); sb.disabled = saveStatus === 'saving'; }
   $('retrySaveBtn').classList.toggle('on', saveStatus === 'error');
   // 保存に失敗したら、クリップ選択中でも再試行へたどり着けるようにする
   if (saveStatus === 'error') $('projectRow').hidden = false;
@@ -1838,14 +2454,19 @@ function serializeProject() {
     id: project.id, name: project.name, createdAt: project.createdAt, updatedAt: project.updatedAt, assetBytes: recalculateAssetBytes(),
     aspect: project.aspect, fit: project.fit, lut: project.lut,
     adjust: { ...project.adjust, hsl: project.adjust.hsl, curve: project.adjust.curve },
-    muteAll: project.muteAll, autoAlign: project.autoAlign, impLen: project.impLen, preset: project.preset,
+    muteAll: project.muteAll, autoAlign: project.autoAlign, autoAmount: autoAmountOf(), impLen: project.impLen, preset: project.preset,
+    posterTime: Number.isFinite(project.posterTime) ? project.posterTime : 0,
     textureSeed: project.textureSeed >>> 0, filmProfile: project.filmProfile,
+    ...(project.hakumeiPlan && validHakumeiPlan(project.hakumeiPlan, project.clips) ? { hakumeiPlan: JSON.parse(JSON.stringify(project.hakumeiPlan)) } : {}),
     lutFileText: project.lutFileText || null, lutFileName: project.lutFileName || null,
     clips: project.clips.map(c => ({
       id: c.id, assetId: c.assetId, kind: c.kind, name: c.name, start: c.start, end: c.end, dur: c.dur,
       bright: c.bright, temp: c.temp, fxScale: c.fxScale, highKey: c.highKey, hsl: c.hsl, curve: c.curve,
       fit: c.fit,                   // このクリップだけの収め方（無ければ作品ぜんぶの設定に従う）
       autoBright: c.autoBright, autoTemp: c.autoTemp,
+      ...(c.analysisVersion === OBSERVATION_VERSION && c.observation
+        ? { analysisVersion: c.analysisVersion, observation: JSON.parse(JSON.stringify(c.observation)) } : {}),
+      ...(c.frameStep ? { frameStep: JSON.parse(JSON.stringify(c.frameStep)) } : {}),
       muted: c.muted, thumb: c.thumb,
     })),
     texts: (project.texts || []).map(t => JSON.parse(JSON.stringify(t))),
@@ -1879,7 +2500,7 @@ function projectAssetIds(st = serializeProject()) {
 }
 function makeProjectMeta(st = serializeProject()) {
   const now = new Date().toISOString();
-  return { id: st.id, name: st.name || '無題の作品', preset: st.preset || null, aspect: st.aspect,
+  return { id: st.id, name: st.name || '無題の作品', preset: st.preset || null, aspect: st.aspect, thumb: projectThumbs.get(st.id) || null,
     duration: (st.clips || []).reduce((n, c) => n + Math.max(0, (c.end || 0) - (c.start || 0)), 0),
     assetBytes: st.assetBytes || [...projectAssetIds(st)].reduce((n, id) => n + (pendingFileWrites.get(id)?.size || 0), 0),
     createdAt: st.createdAt || now, updatedAt: now };
@@ -1947,6 +2568,14 @@ async function createClip(fileBlob, meta, analyze, kindHint) {
     autoBright: meta?.autoBright || 0, autoTemp: meta?.autoTemp || 0,
     muted: meta?.muted || false,
   };
+  // 素材観察は新規取り込み時だけ作る。復元・複製では保存済みの数値をそのまま戻し、
+  // 観察を持たない既存作品を開いたときに後追い解析しない。
+  if (meta?.analysisVersion === 2 && meta?.observation) {
+    clip.analysisVersion = 2;
+    clip.observation = JSON.parse(JSON.stringify(meta.observation));
+  }
+  // 隣接フレーム差（T6-D）。持っていれば戻し、無ければ薄明v2の作品を開いたときに一度だけ測る。
+  if (meta?.frameStep && validClipFrameStep(meta.frameStep)) clip.frameStep = JSON.parse(JSON.stringify(meta.frameStep));
   // このクリップだけの収め方。持っていないのが普通（＝作品ぜんぶの設定に従う）なので、
   // 既定値では入れず、指定があるときだけ生やす
   if (meta?.fit === 'cover' || meta?.fit === 'contain') clip.fit = meta.fit;
@@ -1980,7 +2609,12 @@ async function createClip(fileBlob, meta, analyze, kindHint) {
       clip.start = 0;
       clip.end = project.impLen > 0 ? Math.min(project.impLen, clip.dur) : clip.dur;
     }
-    video.addEventListener('seeked', () => { if (!playing && lastDrawn === clip) drawStill(clip); });
+    // requestSeek / サムネイル生成がseekを完了した直後は、その処理自身が描画を行う。
+    // ここでも描くとホーム→プレビュー初回だけ同じフレームを二重に描き、色が一瞬
+    // 戻ったように見えるため、手元のseek処理中は重ねて描かない。
+    video.addEventListener('seeked', () => {
+      if (!playing && !seekBusy && !thumbBusy && lastDrawn === clip) drawStill(clip);
+    });
     const advance = () => { if (playing && project.clips[playIdx] === clip) { checkAdvance(); syncPlayhead(); } };
     video.addEventListener('timeupdate', advance);
     video.addEventListener('ended', advance);
@@ -2013,47 +2647,735 @@ async function makeThumb(clip) {
   clip.thumb = c.toDataURL('image/jpeg', 0.6);
 }
 
-// 取り込み時に明るさ・色かぶりを測って、自動そろえ用のオフセットを決める
-async function analyzeClip(clip) {
-  try {
-    const c = document.createElement('canvas');
-    c.width = 64; c.height = 36;
-    const x = c.getContext('2d', { willReadFrequently: true });
-    const pts = clip.kind === 'photo' ? [null]
-      : [0.2, 0.5, 0.8].map(p => clamp(clip.start + clipLen(clip) * p, 0, Math.max(0, clip.dur - 0.05)));
-    let lum = 0, rb = 0, n = 0;
-    for (const t of pts) {
-      if (t != null) await seekTo(clip.video, t);
-      try { x.drawImage(clipSource(clip), 0, 0, 64, 36); } catch (e) { continue; }
-      const d = x.getImageData(0, 0, 64, 36).data;
-      for (let i = 0; i < d.length; i += 4) {
-        lum += (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
-        rb += (d[i] - d[i + 2]) / 255;
-        n++;
-      }
+// 既存Autoの値を守るため、旧64×36・20/50/80%の計算は意味を変えず分離する。
+async function analyzeLegacyAuto(clip) {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 36;
+  const x = c.getContext('2d', { willReadFrequently: true });
+  const pts = clip.kind === 'photo' ? [null]
+    : [0.2, 0.5, 0.8].map(p => clamp(clip.start + clipLen(clip) * p, 0, Math.max(0, clip.dur - 0.05)));
+  let lum = 0, rb = 0, n = 0;
+  for (const t of pts) {
+    if (t != null) await seekTo(clip.video, t);
+    try { x.drawImage(clipSource(clip), 0, 0, 64, 36); } catch (e) { continue; }
+    const d = x.getImageData(0, 0, 64, 36).data;
+    for (let i = 0; i < d.length; i += 4) {
+      lum += (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
+      rb += (d[i] - d[i + 2]) / 255;
+      n++;
     }
-    if (!n) return;
-    const meanLum = lum / n, meanRb = rb / n;
-    clip.meanLum = meanLum; clip.meanRb = meanRb;
-    // 明るさ: 目標0.42へ寄せる（70%だけ効かせ、±0.7EVで頭打ち）
-    clip.autoBright = meanLum > 0.02 ? clamp(Math.log2(0.42 / meanLum) * 0.7, -0.7, 0.7) : 0;
-    // 色: グレーワールド仮定でR-Bの偏りを半分だけ中和
-    clip.autoTemp = clamp(-meanRb * 1.5, -0.4, 0.4);
-    if (clip.kind === 'video') await seekTo(clip.video, clip.start);
-  } catch (e) { }
+  }
+  if (!n) return;
+  const meanLum = lum / n, meanRb = rb / n;
+  clip.meanLum = meanLum; clip.meanRb = meanRb;
+  // 明るさ: 目標0.42へ寄せる（70%だけ効かせ、±0.7EVで頭打ち）
+  clip.autoBright = meanLum > 0.02 ? clamp(Math.log2(0.42 / meanLum) * 0.7, -0.7, 0.7) : 0;
+  // 色: グレーワールド仮定でR-Bの偏りを半分だけ中和
+  clip.autoTemp = clamp(-meanRb * 1.5, -0.4, 0.4);
 }
 
-async function addFiles(files, kind) {
-  if (!files.length) return;
-  const requestedBytes = files.reduce((n, f) => n + (f.size || 0), 0);
-  if (!(await confirmStorageForAdditional(requestedBytes))) return;
-  const historyBefore = beginHistory();
+const OBSERVATION_VERSION = 2;
+const OBSERVATION_WIDTH = 96;
+const OBSERVATION_HEIGHT = 54;
+const OBSERVATION_VIDEO_FRACTIONS = [0.1, 0.3, 0.5, 0.7, 0.9];
+const observationRound = value => Number(Number(value).toFixed(6));
+function observationMedian(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+function observationQuantile(sorted, fraction) {
+  if (!sorted.length) return null;
+  const position = (sorted.length - 1) * fraction;
+  const lower = Math.floor(position), upper = Math.ceil(position), mix = position - lower;
+  return sorted[lower] * (1 - mix) + sorted[upper] * mix;
+}
+function measureObservationFrame(data, width, height, sampleFraction, sourceTime) {
+  const luminances = [], saturations = [], neutralRbValues = [];
+  let white = 0, black = 0, lowSatCandidates = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i] / 255, g = data[i + 1] / 255, b = data[i + 2] / 255;
+    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const saturation = max > 0 ? (max - min) / max : 0;
+    luminances.push(luma); saturations.push(saturation);
+    if (luma >= 0.98) white++;
+    if (luma <= 0.02) black++;
+    // 色偏りは中間調かつ低彩度だけを見る。飽和画素（RGBの最大値0.98以上）は除外する。
+    if (luma >= 0.15 && luma <= 0.9 && saturation <= 0.1 && max < 0.98) {
+      lowSatCandidates++;
+      neutralRbValues.push(r - b);
+    }
+  }
+  const sortedLuma = [...luminances].sort((a, b) => a - b);
+  const sortedSaturation = [...saturations].sort((a, b) => a - b);
+  const p95 = observationQuantile(sortedLuma, 0.95);
+  let brightWeight = 0, brightX = 0, brightY = 0;
+  for (let i = 0; i < luminances.length; i++) {
+    if (luminances[i] < p95) continue;
+    const weight = Math.max(1 / 255, luminances[i] - p95 + 1 / 255);
+    brightWeight += weight;
+    brightX += ((i % width) + 0.5) / width * weight;
+    brightY += (Math.floor(i / width) + 0.5) / height * weight;
+  }
+  const count = luminances.length;
+  return {
+    sampleFraction, sourceTime: sourceTime == null ? null : observationRound(sourceTime),
+    luma: {
+      p05: observationRound(observationQuantile(sortedLuma, 0.05)),
+      p25: observationRound(observationQuantile(sortedLuma, 0.25)),
+      p50: observationRound(observationQuantile(sortedLuma, 0.5)),
+      p75: observationRound(observationQuantile(sortedLuma, 0.75)),
+      p95: observationRound(p95),
+    },
+    whiteClipRate: observationRound(white / count),
+    blackCrushRate: observationRound(black / count),
+    saturationMedian: observationRound(observationQuantile(sortedSaturation, 0.5)),
+    lowSaturationCandidateRate: observationRound(lowSatCandidates / count),
+    neutralRbBias: neutralRbValues.length ? observationRound(observationMedian(neutralRbValues)) : null,
+    neutralSampleCount: neutralRbValues.length,
+    brightCentroid: brightWeight > 0 ? { x: observationRound(brightX / brightWeight), y: observationRound(brightY / brightWeight) } : null,
+  };
+}
+function measureObservationMotion(previous, current, width, height) {
+  let rawDifference = 0;
+  for (let i = 0; i < current.length; i++) rawDifference += Math.abs(current[i] - previous[i]);
+  rawDifference /= current.length;
+  let best = { dx: 0, dy: 0, error: Infinity };
+  for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+    let error = 0, count = 0;
+    for (let y = 3; y < height - 3; y++) for (let x = 3; x < width - 3; x++) {
+      error += Math.abs(current[y * width + x] - previous[(y + dy) * width + x + dx]);
+      count++;
+    }
+    error /= Math.max(1, count);
+    const magnitude = dx * dx + dy * dy, bestMagnitude = best.dx * best.dx + best.dy * best.dy;
+    if (error < best.error - 1e-9 || (Math.abs(error - best.error) <= 1e-9 && magnitude < bestMagnitude)) best = { dx, dy, error };
+  }
+  const direction = rawDifference < 0.01 || (best.dx === 0 && best.dy === 0) ? 'still'
+    : Math.abs(best.dx) >= Math.abs(best.dy) ? (best.dx > 0 ? 'right' : 'left') : (best.dy > 0 ? 'down' : 'up');
+  return { amount: observationRound(rawDifference), direction, dx: best.dx, dy: best.dy, alignedDifference: observationRound(best.error) };
+}
+async function observeClip(clip) {
+  const fractions = clip.kind === 'photo' ? [null] : OBSERVATION_VIDEO_FRACTIONS;
+  const canvas = document.createElement('canvas');
+  canvas.width = OBSERVATION_WIDTH; canvas.height = OBSERVATION_HEIGHT;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  const frames = [], lumaFrames = [];
+  for (const fraction of fractions) {
+    const sourceTime = fraction == null ? null
+      : clamp(clip.start + clipLen(clip) * fraction, 0, Math.max(0, clip.dur - 0.05));
+    if (sourceTime != null) await seekTo(clip.video, sourceTime);
+    let source = clipSource(clip);
+    if (clip.kind === 'video' && typeof VideoFrame === 'function') source = new VideoFrame(clip.video);
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    try { context.drawImage(source, 0, 0, canvas.width, canvas.height); }
+    finally { if (source !== clip.video && typeof source.close === 'function') source.close(); }
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    const luma = new Float32Array(canvas.width * canvas.height);
+    for (let i = 0, p = 0; i < pixels.length; i += 4, p++) luma[p] = (0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2]) / 255;
+    lumaFrames.push(luma);
+    frames.push(measureObservationFrame(pixels, canvas.width, canvas.height, fraction, sourceTime));
+  }
+  const p50Values = frames.map(frame => frame.luma.p50);
+  const p50Median = observationMedian(p50Values);
+  const neutralValues = frames.map(frame => frame.neutralRbBias).filter(Number.isFinite);
+  const neutralMedian = observationMedian(neutralValues);
+  const motionPairs = [];
+  for (let i = 1; i < lumaFrames.length; i++) motionPairs.push(measureObservationMotion(lumaFrames[i - 1], lumaFrames[i], canvas.width, canvas.height));
+  let hdr = { status: 'unknown', hdrSuspected: false, metadata: null, reason: clip.kind === 'photo' ? 'not-video' : 'metadata-unavailable' };
+  if (clip.kind === 'video') {
+    try {
+      const { info } = await parseMp4Info(clip.file);
+      hdr = inspectVideoHdrMetadata(info.videoTracks?.[0]);
+    } catch (e) { hdr = { ...hdr, reason: 'metadata-unavailable' }; }
+  }
+  return {
+    status: 'complete', kind: clip.kind,
+    sampling: { width: canvas.width, height: canvas.height, fractions, colorMath: 'sRGB bytes; Rec.709 luma; HSV saturation' },
+    frames,
+    start: frames[0], end: frames[frames.length - 1],
+    temporal: {
+      p50Median: observationRound(p50Median),
+      p50Mad: observationRound(observationMedian(p50Values.map(value => Math.abs(value - p50Median)))),
+      neutralRbMedian: neutralMedian == null ? null : observationRound(neutralMedian),
+      neutralRbMad: neutralMedian == null ? null : observationRound(observationMedian(neutralValues.map(value => Math.abs(value - neutralMedian)))),
+    },
+    motion: {
+      pairs: motionPairs,
+      amountMedian: motionPairs.length ? observationRound(observationMedian(motionPairs.map(pair => pair.amount))) : 0,
+      coarseDirection: motionPairs.length ? motionPairs.slice().sort((a, b) => b.amount - a.amount)[0].direction : 'still',
+    },
+    hdr,
+  };
+}
+
+// 取り込み時に旧Autoを決め、その後に補正へ使わない観察値だけを保存する。
+async function analyzeClip(clip) {
+  try { await analyzeLegacyAuto(clip); } catch (e) { }
+  try {
+    clip.analysisVersion = OBSERVATION_VERSION;
+    clip.observation = await observeClip(clip);
+  } catch (e) {
+    clip.analysisVersion = OBSERVATION_VERSION;
+    clip.observation = { status: 'failed', kind: clip.kind, reason: 'measurement-failed' };
+  }
+  try { const v = await measureClipFrameStep(clip); if (v) clip.frameStep = v; } catch (e) { }
+  if (clip.kind === 'video') try { await seekTo(clip.video, clip.start); } catch (e) { }
+}
+
+// ===== HKR-006 T2: 薄明の作品設計 =====
+// T1の生フレームを保存し直さず、境目を判断する最小限の数値だけを使う。
+// v2: 旧版が大きな動きへLightを昇格した計画を再利用せず、安全条件で作り直す。
+const HAKUMEI_PLAN_VERSION = 2;
+// ===== HKR-006 T7: 作品全体の調和（境目前後で中間調と色の飛びを小さくする） =====
+// 同種場面（中間調の差≤0.25・R-B偏りの差≤0.12・確信度あり・暗部主体でない）の境目だけ、両側の最後／最初の
+// ramp秒で、それぞれ差の半分（share）まで相手側へ寄せる。露出はEV（exp2）、色は uTemp（R×(1+0.14t)・B×(1-0.14t)）。
+// 通常は medium（2026-09-16 採用）。比較は `?dev=1&hkr005=1&hkr006Harmony=off|weak|medium`。
+const HAKUMEI_HARMONY = Object.freeze({
+  sameLumaDelta: 0.25, sameRbDelta: 0.12, ramp: 1.0, share: 0.5,
+  evPerLuma: 6.0,       // sRGB中間調で1EV≈0.17の差（0.45→0.62）
+  tempPerRb: 7.0,       // R-B偏り0.14 ≈ uTemp 1.0
+  levels: Object.freeze({ weak: { level: 0.5, capEv: 0.10, capTemp: 0.12 }, medium: { level: 1.0, capEv: 0.20, capTemp: 0.25 } }),
+  defaultLevel: 'medium',
+});
+// 2026-09-16 ユーザー採用: 通常は medium。比較は `hkr006Harmony=off|weak|medium`。
+// 5-3 コマ保持の比較: `hkr008Cadence=hold17|hold25`（30fps基調・保持率17%／25%・連続2まで）。指定なしは従来の19fps格子。
+const AOI_HOLD_LEVELS = Object.freeze({
+  hold17: Object.freeze({ base: 30, rate: 0.17, max: 2 }),
+  hold25: Object.freeze({ base: 30, rate: 0.25, max: 2 }),
+  hold35: Object.freeze({ base: 30, rate: 0.35, max: 3 }),      // あえて落とす: 実効約19fps・連続3まで
+  film24: Object.freeze({ base: 24, rate: 0.17, max: 2 }),      // 24fps基調＋散発保持: 実効約20fps（映画フィルム寄り）
+  film18: Object.freeze({ base: 18, rate: 0.10, max: 2 }),      // 18fps基調（8mm寄り）: 実効約16fps
+});
+// 5-4 シャッターの残像の比較: `hkr008Shutter=mid|strong`（直前フレームを35%／50%混ぜる）。既定は0。
+const AOI_SHUTTER_LEVELS = Object.freeze({ mid: 0.35, strong: 0.50 });
+// 5-5 光漏れの色の比較: `hkr008Leak=cool` で青白。既定は profile.leakTint === 'cool' のとき。
+function aoiLeakCool(profile) {
+  if (!profile?.mvLook) return false;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr008Leak')) return query.get('hkr008Leak') === 'cool';
+  return profile.leakTint === 'cool';
+}
+// 時間設計の比較（HKR-008・2026-09-17）: `hkr008Grid=on`＝手ブレ量子化を保持格子へ一本化、`hkr008MotionShutter=on`＝残像を動き量に比例。
+function aoiTimeGridUnified(profile) {
+  if (!profile?.mvLook) return false;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr008Grid')) return query.get('hkr008Grid') === 'on';
+  return !!profile.timeGridUnified;
+}
+function aoiMotionShutter(profile) {
+  if (!profile?.mvLook) return null;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr008MotionShutter')) { const v = query.get('hkr008MotionShutter'); return v === 'on' ? 'on' : v === 'weak' ? 'weak' : null; }
+  return profile.motionShutter || null;   // 'on'（0.15〜0.50）／'weak'（0.12〜0.32）
+}
+function aoiShutterBlend(profile) {
+  if (!profile?.mvLook) return 0;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr008Shutter')) return AOI_SHUTTER_LEVELS[query.get('hkr008Shutter')] || 0;
+  return profile.shutterBlend || 0;
+}
+// 時間設計3 手ブレの止まり: 作品時刻を window 秒の窓に切り、seedで選んだ窓に min〜max 秒の静止区間を1つ置く。
+// 戻り値は「これまでに止まっていた合計秒」＝手ブレ関数へ渡す時刻から引く量。開始と長さはコマ格子に揃える。作品時刻の純関数。
+const AOI_REST_LEVELS = Object.freeze({
+  on: Object.freeze({ window: 2.0, rate: 0.5, min: 0.3, max: 0.8 }),
+  strong: Object.freeze({ window: 1.5, rate: 0.7, min: 0.4, max: 1.0 }),
+});
+function aoiHandheldRest(profile) {
+  if (!profile?.mvLook) return null;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr008Rest')) return AOI_REST_LEVELS[query.get('hkr008Rest')] || null;
+  return profile.handheldRest || null;
+}
+function aoiHandheldRestShift(profile, time, seed) {
+  const rest = aoiHandheldRest(profile);
+  if (!rest || !(time > 0)) return 0;
+  const hz = profile.cadenceHold?.base || 24;
+  let shift = 0;
+  for (let w = 0; w * rest.window <= time; w++) {
+    if (textureSeedUnit(seed, w, 0x7e57a11d) >= rest.rate) continue;
+    const dur = Math.round((rest.min + textureSeedUnit(seed, w, 0x2b5d0c33) * (rest.max - rest.min)) * hz) / hz;
+    const start = Math.round((w * rest.window + textureSeedUnit(seed, w, 0x61c88647) * Math.max(0, rest.window - dur)) * hz) / hz;
+    shift += clamp(time - start, 0, dur);
+  }
+  return shift;
+}
+// `hkr008TransMix=airu`＝つなぎ60で白32%・黒4%（暖色ウォッシュ・焼けなし）。係数はスライダー値を掛ける前の比率。
+const AOI_TRANS_MIX = Object.freeze({ airu: Object.freeze({ flash: 0.53, black: 0.07 }) });
+// `hkr008Flash=classic`＝旧来の白のつなぎのまま、借り色の境目（光の輪郭）だけ直す。
+// `hkr008Flash=wrap|wraphalf`＝青い記憶v2の白のつなぎを、頂上で全面が白に包まれる形にする（元Airu実測）。
+function aoiTransWrap(profile) {
+  if (!profile?.mvLook) return 0;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr008Flash')) return ({ wrap: 1, wraphalf: 0.5, classic: -1, frames: -1 })[query.get('hkr008Flash')] || 0;
+  return profile.transWrap || 0;
+}
+// F1 フラッシュフレーム型の白のつなぎ（元Airu実測・白の区間28個）:
+//  立ち上がり 1コマ13／28・2コマ7・3〜5コマ6（裾なし）／持続 中央値5コマ（1〜25）で頂上もコマごとに±4揺れる／
+//  抜けは1コマ11／28（白の中で切り替わり、いきなり通常露出）・残りは3〜8コマで段々に戻る／二連が約3割。
+// 滑らかな曲線は使わず、すべてコマ単位の階段で作る。fr は境目を0としたフィルムコマ番号（負＝前のカット）。
+function aoiFlashFrames(profile) {
+  if (!profile?.mvLook) return false;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr008Flash')) return ['frames', 'over'].includes(query.get('hkr008Flash'));
+  return !!profile.flashFrames;
+}
+// F2 露出が飛ぶコマの「黒の床」の色。元Airu実測では回ごとに違う（ローズが約半数）。null＝従来の光のヴェール。
+const AOI_OVER_FLOORS = Object.freeze([
+  [0.45, [0.80, 0.66, 0.68]],   // ローズ (204,167,173)
+  [0.65, [0.86, 0.80, 0.70]],   // クリーム (228,215,192)寄り
+  [0.80, [0.86, 0.82, 0.89]],   // ラベンダー (222,214,230)
+  [0.90, [0.86, 0.74, 0.64]],   // 橙
+  [1.01, [0.66, 0.72, 0.75]],   // 青灰
+]);
+function aoiOverFloor(profile, f, variant = null) {
+  if (!profile?.mvLook) return null;
+  const query = new URLSearchParams(location.search);
+  const on = query.has('dev') && query.has('hkr005') && query.has('hkr008Flash') ? query.get('hkr008Flash') === 'over' : !!profile.flashOver;
+  if (!on) return null;
+  const u = fractSeed(f.seed * 263 + 0.71);
+  const floor = variant ? variant.floor : AOI_OVER_FLOORS.find(([edge]) => u < edge)[1];
+  return { floor, far: variant ? variant.far : 0, cast: variant ? variant.cast : [1, 1, 1] };
+}
+// 空間の出方と抜けの色は、時間の変種とは別々に回す（3軸が独立に回るので、組み合わせが同じになることは実質ない）。
+// 空間: 全面一様 2／5、片側 3／5（遠い側は 0.55〜0.75 で止まる＝元Airuの頂上ブロック157〜220）。
+// 2026-09-18 目視「30の白2回が同じに見える」→ 片側型は遠い側をほぼ素のまま残す（0.20〜0.40）、全面と片側を交互に出す。
+const AOI_OVER_PARTIAL = Object.freeze([0.35, 0.45, 0.55]);   // 明るい素材では 0.2〜0.4 だと光だけ飛ぶ型がほぼ見えなかった（2026-09-19）
+// 抜けぎわの色被り: 無彩色／シアン（元Airu 23.60s）／黄（31.60s）／桃／青灰
+const AOI_OVER_CASTS = Object.freeze([[1, 1, 1], [0.90, 1.02, 1.05], [1.06, 1.03, 0.90], [1.06, 0.96, 1.00], [0.94, 0.98, 1.04]]);
+function seededOrder(seed, n, salt) {
+  const order = [...Array(n).keys()];
+  for (let i = n - 1; i > 0; i--) { const j = Math.floor(textureSeedUnit(seed, i, salt) * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  return order;
+}
+// 白のつなぎの変種（2026-09-18 ユーザー「1回の作品内で同じものがないように」）。長さ・抜け方・強さ・二連・黒の床の色を組で変える。
+// 作品の seed で並べ替えた表を、白の順番（ordinal）で順に使う。表が尽きたら次の周は色だけずらす。
+const AOI_FLASH_VARIANTS = Object.freeze([
+  // fog: 画面全体がパステル色の霧に包まれる（黒の床が高い）。blow: 黒は残り、明るい所だけが飛ぶ（床が低い／片側）。
+  // 2026-09-18 目視「2回が同じに見える」→ 隣り合う白は必ず fog と blow を交互にする（見た目の差が最も大きい軸）。
+  { name: 'ローズの霧・短く切れる',     fog: true,  hold: [2, 4],  cutOut: true,  strength: 1.0,  multi: false, floor: [0.80, 0.66, 0.68] },
+  { name: 'ラベンダーの霧・階段で戻る', fog: true,  hold: [4, 8],  cutOut: false, strength: 1.0,  multi: false, floor: [0.86, 0.82, 0.89] },
+  { name: 'クリームの霧・二連',         fog: true,  hold: [2, 3],  cutOut: true,  strength: 0.95, multi: true,  floor: [0.86, 0.80, 0.70] },
+  { name: '青灰の霧・長い',             fog: true,  hold: [9, 12], cutOut: true,  strength: 1.0,  multi: false, floor: [0.66, 0.72, 0.75] },
+  { name: '光だけ飛ぶ・黒は残る',       fog: false, hold: [3, 5],  cutOut: true,  strength: 1.0,  multi: false, floor: [0.42, 0.38, 0.41] },
+  { name: '光だけ飛ぶ・一瞬',           fog: false, hold: [2, 2],  cutOut: true,  strength: 1.0,  multi: false, floor: [0.46, 0.42, 0.44] },
+  { name: '光だけ飛ぶ・片側から長め',   fog: false, hold: [5, 8],  cutOut: false, strength: 1.0,  multi: false, floor: [0.50, 0.44, 0.48] },
+  { name: '橙・淡く（絵が残る）',       fog: false, hold: [3, 6],  cutOut: false, strength: 0.85, multi: false, floor: [0.86, 0.74, 0.64] },
+]);
+function flashVariantAt(seed, ordinal) {
+  const fogs = AOI_FLASH_VARIANTS.map((v, i) => v.fog ? i : -1).filter(i => i >= 0);
+  const blows = AOI_FLASH_VARIANTS.map((v, i) => !v.fog ? i : -1).filter(i => i >= 0);
+  const fogOrder = seededOrder(seed, fogs.length, 0x5f1a3c77).map(i => fogs[i]);
+  const blowOrder = seededOrder(seed, blows.length, 0x2d9e4b13).map(i => blows[i]);
+  const fogFirst = textureSeedUnit(seed, 0, 0x3a7f19c5) < 0.5;
+  const isFog = (ordinal % 2 === 0) === fogFirst;
+  const list = isFog ? fogOrder : blowOrder, k = Math.floor(ordinal / 2);
+  const base = AOI_FLASH_VARIANTS[list[k % list.length]];
+  const round = Math.floor(k / list.length);
+  const floor = round === 0 ? base.floor : AOI_FLASH_VARIANTS[list[(k + round) % list.length]].floor;   // 周回後は色だけ別の変種から借りる
+  // 空間: 霧は全面。光だけ飛ぶ型は 全面／片側（遠い側を 0.2〜0.4 に留める）を seed 順で回す。
+  const far = isFog ? 0 : [0, ...AOI_OVER_PARTIAL][seededOrder(seed, AOI_OVER_PARTIAL.length + 1, 0x3a7f19c5)[k % (AOI_OVER_PARTIAL.length + 1)]];
+  const cast = AOI_OVER_CASTS[seededOrder(seed, AOI_OVER_CASTS.length, 0x71c3e8b1)[ordinal % AOI_OVER_CASTS.length]];
+  return { ...base, floor, far, cast };
+}
+// 白の長さ。元Airuは1〜25コマ（中央値5・10コマ以上が25%）だが、暗い素材では長い白が目立つため上限12・9コマ以上は15%に抑える（2026-09-18 ユーザー決定）。
+function flashHoldBase(f) {
+  const u = k => fractSeed(f.seed * k + 0.137);
+  return u(227) < 0.85 ? 2 + Math.floor(u(257) * 7) : 9 + Math.floor(u(257) * 4);       // 85%: 2〜8コマ／15%: 9〜12コマ
+}
+function flashFrameAt(fr, f, maxBefore, maxAfter, variant = null) {
+  const u = k => fractSeed(f.seed * k + 0.137);
+  const rise = u(211) < 0.55 ? 1 : u(211) < 0.85 ? 2 : 3 + Math.floor(u(223) * 2);      // 頂上に達するまでのコマ数
+  let hold = variant ? variant.hold[0] + Math.floor(u(257) * (variant.hold[1] - variant.hold[0] + 1)) : flashHoldBase(f);
+  const cutOut = variant ? variant.cutOut : u(229) < 0.40;                              // 白は前のカットの末尾だけ。境目でいきなり切れる
+  const strength = variant ? variant.strength : 1, multi = variant ? variant.multi : f.multi;
+  const fall = cutOut ? 0 : 3 + Math.floor(u(233) * 6);                                 // 次のカットの頭で3〜8コマかけて戻る
+  // 白のうち何コマを境目の前に置くか。cutOut は全部前。それ以外は1コマ以上を前に置き、残りを次のカットの頭へ。
+  let before = cutOut ? hold : Math.max(1, Math.round(hold * (0.3 + 0.7 * u(239))));
+  before = Math.max(1, Math.min(before, Math.max(1, maxBefore - (rise - 1))));
+  hold = cutOut ? before : Math.min(hold, before + Math.max(0, maxAfter - fall));
+  const start = -before, end = start + hold;                                            // 頂上は [start, end)
+  const wobble = n => 0.94 * (1 + 0.06 * (2 * fractSeed(f.seed * 307 + n * 0.618) - 1)); // 頂上の露出はコマごとに揺れる
+  let env = 0, phase = 0.5, recover = 0, first = false;
+  if (fr >= start - (rise - 1) && fr < start) { env = (fr - (start - rise)) / rise * wobble(fr); phase = 0.2; first = true; }
+  else if (fr >= start && fr < end) { env = wobble(fr); first = fr === start && rise === 1; }
+  else if (fr >= end && fr < end + fall) { const k = (fr - end + 1) / (fall + 1); env = Math.pow(1 - k, 1.6) * wobble(fr); phase = 0.5 + 0.5 * k; recover = Math.sin(Math.PI * k); }
+  // 二連: 最初の光が消えた3〜20コマあと（0.13〜0.9秒）に、1〜3コマだけの短い光
+  if (env <= 0 && multi) {
+    const s2 = end + fall + 3 + Math.floor(u(241) * 18), h2 = 1 + Math.floor(u(251) * 3);
+    if (fr >= s2 && fr < s2 + h2 && s2 + h2 <= maxAfter) { env = 0.9 * wobble(fr + 97); phase = 0.5; }
+  }
+  return env > 0 ? { env: env * strength, phase, recover, first } : null;
+}
+function aoiTransMix() {
+  if (project.adjust.effect !== 2) return null;
+  const profile = currentFilmProfile();
+  if (!profile?.mvLook) return null;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr008TransMix')) return AOI_TRANS_MIX[query.get('hkr008TransMix')] || null;
+  return profile.transMix || null;
+}
+function aoiMovingHold(profile, clip) {
+  if (!profile?.mvLook || !profile.motionGate || clip?.kind !== 'video' || !clip.frameStep) return null;
+  if (clip.frameStep.median <= profile.motionGate.threshold) return null;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr008MovingHold')) {
+    const [rate, max] = query.get('hkr008MovingHold').split(',').map(Number);
+    return Number.isFinite(rate) && Number.isFinite(max) ? { rate: clamp(rate, 0, 1), max: clamp(Math.round(max), 0, 4) } : null;
+  }
+  return profile.movingHold || null;
+}
+function aoiCadenceHold(profile) {
+  if (!profile?.mvLook) return null;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr008Cadence')) return AOI_HOLD_LEVELS[query.get('hkr008Cadence')] || null;
+  return profile.cadenceHold || null;
+}
+function hakumeiCadenceOverride(profile) {
+  if (!isHakumeiProfile(profile) || profile !== FILM_PROFILES['hakumei-v2']) return 0;
+  const query = new URLSearchParams(location.search);
+  if (!query.has('dev') || !query.has('hkr005')) return 0;
+  const value = Number(query.get('hkr006Cadence'));
+  return Number.isFinite(value) && value >= 8 && value <= 30 ? value : 0;
+}
+function hakumeiHarmonyLevel(profileKey) {
+  const setting = FILM_PROFILES[profileKey]?.harmony;
+  if (!setting) return null;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr006Harmony')) return HAKUMEI_HARMONY.levels[query.get('hkr006Harmony')] || null;
+  return HAKUMEI_HARMONY.levels[setting.defaultLevel] || null;
+}
+function validHakumeiHarmony(value) {
+  return value === undefined || (isRecord(value) && typeof value.same === 'boolean'
+    && finiteNumber(value.lumaDelta) && Math.abs(value.lumaDelta) <= 1
+    && (value.rbDelta === null || (finiteNumber(value.rbDelta) && Math.abs(value.rbDelta) <= 2)));
+}
+// ===== HKR-008 段階5 E1: カット別スタイルの抽選 =====
+// 元Airu実測（56カット）: 乳白（黒p1>60）34%・白飛び（≥250が20%超）21%・標準の残り。カット間の中間調sd 57。
+// seedとカット順から再現可能に抽選し、隣接カットで同じ非標準クラスが並ばないようにする。
+// 値は encoded 階調の stock 段（blackLift／contrast／saturation）と露出（EV）に加算する。
+const AOI_STYLE_LEVELS = Object.freeze({
+  off:  null,
+  half: Object.freeze({ milky: 0.15, blown: 0.10, amp: 1.0 }),
+  full: Object.freeze({ milky: 0.30, blown: 0.20, amp: 1.0 }),
+});
+function aoiStyleLevel(profile) {
+  const setting = profile?.styleLottery;
+  if (!setting) return null;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.has('hkr008Style')) return AOI_STYLE_LEVELS[query.get('hkr008Style')] || null;
+  return AOI_STYLE_LEVELS[setting.defaultLevel] || null;
+}
+// 作品全体のスタイル列。カット順 k と seed だけで決まる（プレビューと書き出しで同じ）。
+function aoiStylePlan(clips, seed, level) {
+  const plan = [];
+  let previous = 'normal';
+  for (let k = 0; k < clips.length; k++) {
+    const salt = hakumeiClipSalt(clips[k].id);
+    const u = textureSeedUnit(seed, salt, 0x5a17e001), v = textureSeedUnit(seed, salt, 0x5a17e002), w = textureSeedUnit(seed, salt, 0x5a17e003);
+    let kind = u < level.milky ? 'milky' : u < level.milky + level.blown ? 'blown' : 'normal';
+    if (kind !== 'normal' && kind === previous) kind = 'normal';   // 同じ非標準クラスを隣接させない
+    const a = level.amp;
+    let style;
+    // 乳白: 黒0→約0.31・白1→約0.90（Airu実測 p1≈80／p90≈230）の線形写像。(c−0.5)(1+k)+0.5+bl で k=−0.41, bl=+0.105 が基準。
+    if (kind === 'milky') style = { kind, exposure: 0, blackLift: (0.08 + 0.06 * v) * a, contrast: -(0.35 + 0.10 * w) * a, saturation: -0.20 * a };
+    else if (kind === 'blown') style = { kind, exposure: (0.70 + 0.40 * v) * a, blackLift: 0, contrast: 0, saturation: -0.10 * a };
+    else style = { kind, exposure: (v - 0.5) * 0.50 * a, blackLift: (w - 0.5) * 0.04 * a, contrast: 0, saturation: 0 };
+    plan.push(style); previous = kind;
+  }
+  return plan;
+}
+function aoiStyleAt(timing, profile) {
+  const level = aoiStyleLevel(profile);
+  if (!level || !timing?.clip || !Number.isInteger(timing.clipIndex)) return null;
+  return aoiStylePlan(project.clips, timing.seed, level)[timing.clipIndex] || null;
+}
+function hakumeiHarmonyAt(timing, profileKey) {
+  const setting = hakumeiHarmonyLevel(profileKey);
+  const plan = project.hakumeiPlan;
+  if (!setting || !plan || !timing?.clip || !Number.isInteger(timing.clipIndex)) return null;
+  const clips = project.clips, i = timing.clipIndex, length = clipLen(timing.clip);
+  const ramp = Math.min(HAKUMEI_HARMONY.ramp, length * 0.4);
+  if (!(ramp > 0)) return null;
+  const byLeftId = new Map(plan.boundaryPlans.map(boundary => [boundary.leftClipId, boundary]));
+  const ease = x => { const t = clamp(x, 0, 1); return t * t * (3 - 2 * t); };
+  // E1のスタイル差（露出）を境目差分に足す。スタイルで開いた差は同種判定から外れ、調和は掛からない。
+  const styleLevel = aoiStyleLevel(FILM_PROFILES[profileKey]);
+  const stylePlan = styleLevel ? aoiStylePlan(clips, timing.seed, styleLevel) : null;
+  const styleLumaDelta = (leftIndex) => stylePlan
+    ? ((stylePlan[leftIndex + 1]?.exposure || 0) - (stylePlan[leftIndex]?.exposure || 0)) / HAKUMEI_HARMONY.evPerLuma
+      + ((stylePlan[leftIndex + 1]?.blackLift || 0) - (stylePlan[leftIndex]?.blackLift || 0)) : 0;
+  const contribution = (boundary, sign, weight, leftIndex) => {
+    const h = boundary?.harmony;
+    if (!h || !(weight > 0)) return [0, 0];
+    const lumaDelta = h.lumaDelta + styleLumaDelta(leftIndex);
+    const same = h.same && Math.abs(lumaDelta) <= HAKUMEI_HARMONY.sameLumaDelta;
+    if (!same) return [0, 0];
+    const ev = clamp(sign * lumaDelta * HAKUMEI_HARMONY.share * HAKUMEI_HARMONY.evPerLuma * setting.level, -setting.capEv, setting.capEv);
+    const temp = h.rbDelta === null ? 0
+      : clamp(sign * h.rbDelta * HAKUMEI_HARMONY.share * HAKUMEI_HARMONY.tempPerRb * setting.level, -setting.capTemp, setting.capTemp);
+    return [ev * weight, temp * weight];
+  };
+  let exposure = 0, temperature = 0;
+  // 右の境目（このカットの終わり）: 相手（右側）へ寄せる＝差の向きそのまま
+  if (i + 1 < clips.length) {
+    const toEnd = length - timing.clipLocalTime;
+    const [ev, temp] = contribution(byLeftId.get(timing.clip.id), +1, ease(1 - toEnd / ramp), i);
+    exposure += ev; temperature += temp;
+  }
+  // 左の境目（このカットの始まり）: 相手（左側）へ寄せる＝差の向きを反転
+  if (i > 0) {
+    const [ev, temp] = contribution(byLeftId.get(clips[i - 1].id), -1, ease(1 - timing.clipLocalTime / ramp), i - 1);
+    exposure += ev; temperature += temp;
+  }
+  return exposure || temperature ? { exposure, temperature } : null;
+}
+const HAKUMEI_PLAN_CONNECTIONS = Object.freeze(['hard-cut', 'light-replacement', 'very-short-dissolve']);
+const HAKUMEI_PLAN_DIRECTIONS = Object.freeze(['none', 'left', 'right', 'up', 'down']);
+const HAKUMEI_PLAN_COLORS = Object.freeze(['warm', 'cool', 'neutral']);
+const hakumeiPlanRound = value => Number(Number(value).toFixed(6));
+function hakumeiPlanFrame(clip, side) {
+  const observation = clip?.observation;
+  if (!observation || !validClipObservation(clip?.analysisVersion, observation) || observation.status !== 'complete') return null;
+  const frame = observation.frames[side === 'left' ? observation.frames.length - 1 : 0];
+  if (!frame) return null;
+  const confidence = clamp((observation.frames.length === (clip.kind === 'video' ? 5 : 1) ? 0.7 : 0.45)
+    + (frame.brightCentroid ? 0.15 : 0) + (frame.neutralRbBias !== null ? 0.15 : 0), 0, 1);
+  return {
+    confidence: hakumeiPlanRound(confidence),
+    quietness: hakumeiPlanRound(clamp(1 - observation.motion.amountMedian / 0.12, 0, 1)),
+    lumaP50: frame.luma.p50, lumaP95: frame.luma.p95,
+    whiteClipRate: frame.whiteClipRate, blackCrushRate: frame.blackCrushRate,
+    saturationMedian: frame.saturationMedian, neutralRbBias: frame.neutralRbBias,
+    brightCentroid: frame.brightCentroid ? { x: frame.brightCentroid.x, y: frame.brightCentroid.y } : null,
+    motionAmount: observation.motion.amountMedian,
+    motionDirection: observation.motion.pairs[observation.motion.pairs.length - 1]?.direction || 'still',
+  };
+}
+function hakumeiPlanDirection(left, right) {
+  if (!left.brightCentroid || !right.brightCentroid) return 'none';
+  const dx = right.brightCentroid.x - left.brightCentroid.x, dy = right.brightCentroid.y - left.brightCentroid.y;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 0.06) return 'none';
+  return Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
+}
+function hakumeiPlanColor(left, right) {
+  if (!Number.isFinite(left.neutralRbBias) || !Number.isFinite(right.neutralRbBias)) return 'neutral';
+  const delta = right.neutralRbBias - left.neutralRbBias;
+  return Math.abs(delta) < 0.035 ? 'neutral' : delta > 0 ? 'warm' : 'cool';
+}
+function hakumeiPlanPick(seed, boundaryKey, choices) {
+  // 候補の資格はこの前に数値だけで確定済み。seedは同格候補の選択にだけ使う。
+  if (choices.length === 1) return choices[0];
+  return choices[fnv1a32Utf8(`${seed}:${boundaryKey}`) % choices.length];
+}
+function makeHakumeiBoundaryPlan(leftClip, rightClip, left, right, seed) {
+  const lumaClose = Math.abs(left.lumaP50 - right.lumaP50) <= 0.12 && Math.abs(left.lumaP95 - right.lumaP95) <= 0.16;
+  const colorClose = Number.isFinite(left.neutralRbBias) && Number.isFinite(right.neutralRbBias)
+    && Math.abs(left.neutralRbBias - right.neutralRbBias) <= 0.09;
+  const centroidDistance = left.brightCentroid && right.brightCentroid
+    ? Math.hypot(left.brightCentroid.x - right.brightCentroid.x, left.brightCentroid.y - right.brightCentroid.y) : Infinity;
+  const compositionClose = centroidDistance <= 0.22;
+  const brightEnough = (left.lumaP95 >= 0.6 && left.whiteClipRate >= 0.002)
+    || (right.lumaP95 >= 0.6 && right.whiteClipRate >= 0.002);
+  const leftBridgeLight = left.lumaP95 >= 0.6 && !!left.brightCentroid && (left.whiteClipRate >= 0.002 || left.lumaP50 >= 0.42);
+  const rightBridgeLight = right.lumaP95 >= 0.6 && !!right.brightCentroid && (right.whiteClipRate >= 0.002 || right.lumaP50 >= 0.42);
+  const bridgeableLight = leftBridgeLight && rightBridgeLight && colorClose && centroidDistance <= 0.30;
+  const darkDominant = (left.lumaP50 < 0.2 && left.lumaP95 < 0.48) || (right.lumaP50 < 0.2 && right.lumaP95 < 0.48);
+  const lowConfidence = Math.min(left.confidence, right.confidence) < 0.7;
+  const largeMotion = Math.max(left.motionAmount, right.motionAmount) > 0.085;
+  const direction = hakumeiPlanDirection(left, right), color = hakumeiPlanColor(left, right);
+  // T7 作品全体の調和: 同種場面と確信できる境目だけ、境目の前後で中間調と色の飛びを小さくするための差分。
+  // 描画で使うかどうかは hakumeiHarmonyLevel（通常OFF・比較採用後にON）が決める。
+  const harmonyLumaDelta = hakumeiPlanRound(right.lumaP50 - left.lumaP50);
+  const harmonyRbDelta = Number.isFinite(left.neutralRbBias) && Number.isFinite(right.neutralRbBias)
+    ? hakumeiPlanRound(right.neutralRbBias - left.neutralRbBias) : null;
+  const harmony = {
+    same: !lowConfidence && !darkDominant && Math.abs(harmonyLumaDelta) <= HAKUMEI_HARMONY.sameLumaDelta
+      && (harmonyRbDelta === null || Math.abs(harmonyRbDelta) <= HAKUMEI_HARMONY.sameRbDelta),
+    lumaDelta: harmonyLumaDelta, rbDelta: harmonyRbDelta,
+  };
+  const hard = (reason, matchedLight = false) => ({ leftClipId: leftClip.id, rightClipId: rightClip.id,
+    connection: 'hard-cut', strength: 0, length: 0, direction: 'none', color: null,
+    reason: matchedLight ? `Hard Cutのまま自然につながる: ${reason}` : `Hard Cut: ${reason}`, harmony });
+  const light = reason => ({ leftClipId: leftClip.id, rightClipId: rightClip.id,
+    connection: 'light-replacement', strength: hakumeiPlanRound(clamp((left.lumaP95 + right.lumaP95) / 2, 0.35, 1)),
+    length: 0.45, direction, color, reason, harmony });
+  if (lowConfidence) return hard('素材観察の確信度が十分でないため、安全側を選択しました');
+  if (darkDominant) return hard('暗部主体で明部の主役を保てないため、安全側を選択しました');
+  if (largeMotion) return hard('大きな動きで二重像を避けるため、安全側を選択しました');
+  if (brightEnough && lumaClose && colorClose && compositionClose) return hard('明部の位置・明るさ・色が近い', true);
+  const choices = [];
+  if (bridgeableLight && left.confidence >= 0.8 && right.confidence >= 0.8) choices.push('light-replacement');
+  if (lumaClose && compositionClose && Math.max(left.motionAmount, right.motionAmount) <= 0.04) choices.push('very-short-dissolve');
+  if (!choices.length) return hard('構図・明るさ・動きの一致条件を満たさないため、安全側を選択しました');
+  const connection = hakumeiPlanPick(seed, `${leftClip.id}:${rightClip.id}`, choices);
+  if (connection === 'light-replacement') return light(`十分な明部があり、主役を失いにくい光の置き換え候補です（${color}・${direction}）`);
+  return { leftClipId: leftClip.id, rightClipId: rightClip.id,
+    connection, strength: hakumeiPlanRound(clamp(1 - centroidDistance / 0.22, 0.35, 1)), length: 0.12,
+    direction, color: null, reason: '構図・明るさ・動きが近く、二重像が出にくいVery Short Dissolve候補です', harmony };
+}
+function makeHakumeiPlan(clips = project.clips) {
+  const seed = normalizeTextureSeed(project.textureSeed, project);
+  const clipPlans = {};
+  for (const clip of clips) {
+    const frame = hakumeiPlanFrame(clip, 'right');
+    if (frame) clipPlans[clip.id] = frame;
+  }
+  const boundaryPlans = [];
+  for (let i = 1; i < clips.length; i++) {
+    const leftClip = clips[i - 1], rightClip = clips[i];
+    const left = hakumeiPlanFrame(leftClip, 'left'), right = hakumeiPlanFrame(rightClip, 'right');
+    if (left && right) boundaryPlans.push(makeHakumeiBoundaryPlan(leftClip, rightClip, left, right, seed));
+  }
+  return Object.keys(clipPlans).length ? { version: HAKUMEI_PLAN_VERSION, seed, clipPlans, boundaryPlans } : null;
+}
+async function makeTransientHakumeiPlan() {
+  const beforeTimes = project.clips.map(clip => clip.kind === 'video' ? clip.video.currentTime : null);
+  try {
+    const observedClips = [];
+    for (const clip of project.clips) {
+      if (clip.observation && validClipObservation(clip.analysisVersion, clip.observation) && clip.observation.status === 'complete') observedClips.push(clip);
+      else observedClips.push({ ...clip, analysisVersion: OBSERVATION_VERSION, observation: await observeClip(clip) });
+    }
+    return makeHakumeiPlan(observedClips);
+  } finally {
+    for (let i = 0; i < project.clips.length; i++) if (project.clips[i]?.kind === 'video' && Number.isFinite(beforeTimes[i])) {
+      try { await seekTo(project.clips[i].video, beforeTimes[i]); } catch (e) { }
+    }
+  }
+}
+function buildHakumeiPlan(options = {}) {
+  if (!isHakumeiPlanProject()) { project.hakumeiPlan = null; return null; }
+  const next = makeHakumeiPlan();
+  if (!next) return null;
+  if (options.commit !== false) project.hakumeiPlan = next;
+  return next;
+}
+function refreshHakumeiPlanIfPresent() {
+  if (project.hakumeiPlan) buildHakumeiPlan();
+}
+function isHakumeiPlanProject() {
+  return isHakumeiPlanProjectState(project);
+}
+function isHakumeiPlanProjectState(state) {
+  // 作品設計（境目の差分・Light候補）を持つのは、harmony を持つフィルムprofileの作品（薄明v2・青い記憶v2）。
+  return state?.preset === 'hakumei' || (!!FILM_PROFILES[state?.filmProfile]?.harmony && state?.adjust?.effect === 2);
+}
+function invalidateHakumeiPlanForTrim() {
+  // T2ではトリム後の再観察をしない。古い端点の判断を最新計画として保存しない。
+  if (project.hakumeiPlan) project.hakumeiPlan = null;
+}
+
+let importLenPrompt = null;
+let importBusy = false;
+function chooseVideoImportLength() {
+  if (importLenPrompt) return importLenPrompt;
+  const sheet = $('importLenSheet');
+  const choices = [...(sheet?.querySelectorAll('[data-import-len]') || [])];
+  const current = [1, 2, 3, 4, 5].includes(project.impLen) ? project.impLen : 3;
+  if (!sheet || !choices.length) return Promise.resolve(current);
+  importLenPrompt = new Promise(resolve => {
+    const finish = value => {
+      sheet.classList.remove('on');
+      choices.forEach(b => { b.onclick = null; });
+      $('importLenCancel').onclick = null;
+      sheet.onclick = null;
+      resolve(value);
+    };
+    choices.forEach(button => {
+      button.classList.toggle('on', Number(button.dataset.importLen) === current);
+      button.onclick = () => finish(Number(button.dataset.importLen));
+    });
+    $('importLenCancel').onclick = () => finish(null);
+    sheet.onclick = e => { if (e.target === sheet) finish(null); };
+    sheet.classList.add('on');
+  });
+  return importLenPrompt.finally(() => { importLenPrompt = null; });
+}
+
+function importFileKind(file) {
+  const mime = String(file?.type || '').toLowerCase();
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('image/')) return 'photo';
+  if (mime.startsWith('audio/')) return 'audio';
+  const name = String(file?.name || '').toLowerCase();
+  if (/\.(mp4|mov|m4v|webm|avi|mkv|mts|m2ts|3gp)$/.test(name)) return 'video';
+  if (/\.(jpg|jpeg|png|svg|heic|heif|webp|gif|bmp|tif|tiff)$/.test(name)) return 'photo';
+  if (/\.(mp3|m4a|wav|aac|flac|ogg|oga|opus|aif|aiff)$/.test(name)) return 'audio';
+  return '';
+}
+function importKindLabel(kind) { return kind === 'video' ? '動画' : kind === 'photo' ? '写真' : kind === 'audio' ? '音楽' : '不明'; }
+function splitImportFiles(files) {
+  const visuals = [], audio = [], unknown = [];
+  for (const file of files || []) {
+    const kind = importFileKind(file);
+    if (kind === 'video' || kind === 'photo') visuals.push(file);
+    else if (kind === 'audio') audio.push(file);
+    else unknown.push(file);
+  }
+  return { visuals, audio: audio[0] || null, extraAudioCount: Math.max(0, audio.length - 1), unknown };
+}
+function importSelectionWarning(selection) {
+  const warnings = [];
+  if (selection.extraAudioCount) warnings.push(`音楽は先頭の1曲だけを使い、残り${selection.extraAudioCount}曲は追加しません`);
+  if (selection.unknown.length) warnings.push(`認識できないファイル${selection.unknown.length}件は追加しません`);
+  return warnings.join('。');
+}
+function importSelectionSummary(files) {
+  const counts = { video: 0, photo: 0, audio: 0 };
+  for (const file of files || []) { const kind = importFileKind(file); if (kind in counts) counts[kind]++; }
+  return [['video', '本'], ['photo', '枚'], ['audio', '曲']]
+    .filter(([kind]) => counts[kind])
+    .map(([kind, unit]) => `${importKindLabel(kind)}${counts[kind]}${unit}`)
+    .join('・');
+}
+function setImportStatus(text, options = {}) {
+  setProjectStatus(text);
+  if (options.fromHome) setHomeStatus(text);
+}
+function summarizeImportOutcome(added, failures) {
+  const counts = { video: 0, photo: 0 };
+  for (const item of added) counts[item.kind]++;
+  const parts = [['video', '本'], ['photo', '枚']]
+    .filter(([kind]) => counts[kind])
+    .map(([kind, unit]) => `${importKindLabel(kind)}${counts[kind]}${unit}`);
+  if (parts.length) return `${parts.join('・')}を追加しました${failures.length ? `（${failures.length}件読み込めませんでした）` : ''}`;
+  return failures.length ? `${failures.length}件の素材を読み込めませんでした` : '素材を追加しませんでした';
+}
+
+async function addFiles(files, kind, options = {}) {
+  const result = { added: [], failures: [], successCount: 0, failureCount: 0, cancelled: false, createdProjectId: null };
+  const entries = [...(files || [])].map(file => {
+    // 既存のファイル選択経路は引数の種別を優先し、Finderドロップは内容から判定する。
+    const resolvedKind = kind === 'video' || kind === 'photo' ? kind : importFileKind(file);
+    return resolvedKind === 'video' || resolvedKind === 'photo' ? { file, kind: resolvedKind } : null;
+  }).filter(Boolean);
+  if (!entries.length) return result;
+  const videoEntries = entries.filter(entry => entry.kind === 'video');
+  let selectedVideoLength = null;
+  if (videoEntries.length) {
+    selectedVideoLength = await chooseVideoImportLength();
+    if (selectedVideoLength == null) {
+      result.cancelled = true;
+      setImportStatus('取り込みをキャンセルしました', options);
+      return result;
+    }
+  }
+  const requestedBytes = entries.reduce((n, entry) => n + (entry.file.size || 0), 0);
+  if (!(await confirmStorageForAdditional(requestedBytes))) {
+    result.cancelled = true;
+    setImportStatus('素材の追加をキャンセルしました', options);
+    return result;
+  }
   let predicted = 0;
   const accepted = [];
-  for (const file of files) {
-    if (kind === 'photo' || project.impLen > 0) {
-      predicted += kind === 'photo' ? project.impLen || 3 : project.impLen;
-      accepted.push(file);
+  for (const entry of entries) {
+    const { file } = entry;
+    if (entry.kind === 'photo' || selectedVideoLength > 0 || project.impLen > 0) {
+      predicted += entry.kind === 'photo' ? project.impLen || 3 : (selectedVideoLength ?? project.impLen);
+      accepted.push(entry);
       continue;
     }
     try {
@@ -2079,31 +3401,97 @@ async function addFiles(files, kind) {
         v.src = url;
       });
       predicted += duration;
-      accepted.push(file);
-    } catch (e) { logErr(`${file.name}: ${e.message}`); }
+      accepted.push(entry);
+    } catch (e) { result.failures.push({ ...entry, message: e.message }); logErr(`${file.name}: ${e.message}`); }
   }
-  if (!accepted.length) return;
-  const after = timelineDur() + predicted;
-  if (after > MAX_PROJECT_SECONDS + 1e-6 && !confirm(`全部追加すると約${after.toFixed(1)}秒です。追加後に短くしてください。続けますか？`)) return;
+  if (!accepted.length) {
+    result.failureCount = result.failures.length;
+    if (result.failures.length) setImportStatus(summarizeImportOutcome([], result.failures), options);
+    return result;
+  }
+  const shouldCreateNew = options.newProject === true || (options.newProject !== false && !project.id);
+  const after = (shouldCreateNew ? 0 : timelineDur()) + predicted;
+  if (after > MAX_PROJECT_SECONDS + 1e-6 && !confirm(`全部追加すると約${after.toFixed(1)}秒です。追加後に短くしてください。続けますか？`)) {
+    result.cancelled = true;
+    setImportStatus('取り込みをキャンセルしました', options);
+    return result;
+  }
+  // 取り込みの確認が全部済んでから新規作品を作る。キャンセルで空作品を残さない。
+  let old = null;
+  const previousImportLength = project.impLen;
+  if (shouldCreateNew) {
+    old = project.id ? JSON.parse(snapshotProject()) : null;
+    if (await newProjectFromPreset('hakumei') === false) {
+      setImportStatus('新しい作品を作成できなかったため、取り込みませんでした', options);
+      return result;
+    }
+    result.createdProjectId = project.id;
+  }
+  if (videoEntries.length) {
+    project.impLen = selectedVideoLength;
+    $('presetSel').value = String(selectedVideoLength);
+    syncImportBadge();
+  }
+  const historyBefore = beginHistory();
   const before = project.clips.length;
-  for (const file of accepted) {
+  for (const entry of accepted) {
     try {
-      const clip = await createClip(file, null, true, kind);
+      const clip = await createClip(entry.file, null, true, entry.kind);
       project.clips.push(clip);
-      pendingFileWrites.set(clip.assetId, file);
+      pendingFileWrites.set(clip.assetId, entry.file);
+      result.added.push({ clip, kind: entry.kind, file: entry.file });
       selId = clip.id;
-    } catch (e) { logErr(e.message); }
+    } catch (e) {
+      result.failures.push({ ...entry, message: e.message });
+      logErr(e.message);
+    }
+  }
+  result.successCount = result.added.length;
+  result.failureCount = result.failures.length;
+  if (!result.added.length && result.createdProjectId) {
+    // 新規作品が空のまま残らないよう、作成済みIDを指定して既存の復帰経路を通す。
+    const failedId = result.createdProjectId;
+    try { await rollbackActivatedProject(failedId, old, []); }
+    finally { historyByProject.delete(failedId); result.createdProjectId = null; }
+    setImportStatus(summarizeImportOutcome([], result.failures), options);
+    return result;
+  }
+  if (!result.added.length && videoEntries.length) {
+    // 既存作品への全失敗では、選択した秒数だけが画面に残らないよう元へ戻す。
+    project.impLen = previousImportLength;
+    $('presetSel').value = String(previousImportLength);
+    syncImportBadge();
   }
   if (before === 0 && project.clips.length) フレームを素材に合わせる(project.clips[0]);
   renderTimeline(); renderClipEdit();
   $('emptyHint').style.display = project.clips.length ? 'none' : 'flex';
-  if (project.clips.length > before) {
+  if (result.added.length) {
+    // 新規にT1観察した素材を入口にだけ設計を作る。既存作品を開いただけでは作らない。
+    buildHakumeiPlan();
     recalculateAssetBytes();
     markDirty();
     seekTimeline(sumBefore(project.clips.length - 1));
     // ファイル選択で複数素材を入れても、履歴は1手だけ。
     commitHistory(historyBefore);
+    if (before === 0) {
+      project.posterTime = await chooseBestPosterTime();
+      markDirty();
+      seekTimeline(project.posterTime);
+      enterScreen03();
+    }
   }
+  if (result.added.length || result.failures.length) setImportStatus(summarizeImportOutcome(result.added, result.failures), options);
+  return result;
+}
+
+async function runFileImport(files, kind, options = {}) {
+  if (importBusy) {
+    setImportStatus('素材を取り込み中です。終わってからもう一度追加してください', options);
+    return { added: [], failures: [], successCount: 0, failureCount: 0, cancelled: true, busy: true, createdProjectId: null };
+  }
+  importBusy = true;
+  try { return await addFiles(files, kind, options); }
+  finally { importBusy = false; }
 }
 
 // ===== タイムライン =====
@@ -2224,7 +3612,7 @@ function renderTransMarks(layer, half) {
   // 最後のカットが素で終わると余韻が切れるため（ユーザー要望）。
   if (amt <= 0 || project.clips.length < 1) return;
   const seed = normalizeTextureSeed(project.textureSeed, project);
-  const film = project.adjust.effect === 2;
+  const film = filmTransitionVocab();
   for (let i = 1; i <= project.clips.length; i++) {
     const kind = transKindAt(i, amt, seed, film);
     const b = document.createElement('button');
@@ -2245,7 +3633,7 @@ function openTransPicker(i) {
   const ov = (project.transOverrides || []).find(x => x.leftClipId === left.id);
   const cur = ov?.kind || 'auto';
   const sheet = $('transPicker');
-  const film = project.adjust.effect === 2;
+  const film = filmTransitionVocab();
   // 語彙は世界観（完成イメージ）で決まるので、選択肢もそれに合わせる
   const isLast = i >= project.clips.length;   // 作品の最後の境目
   sheet.querySelectorAll('[data-kind]').forEach(b => {
@@ -2397,25 +3785,38 @@ function clipAt(t) {
 
 // 描画時刻の唯一の入口。作品時間Tでclipを選び、sourceだけをclip-localの
 // 16/18fpsにquantizeする。質感のfilmFrame/effectTimeはclip境界で絶対に戻さない。
-function getTimelineRenderTiming(T) {
+function getTimelineRenderTiming(T, renderOptions = {}) {
   const total = timelineDur();
   const timelineTime = clamp(Number.isFinite(T) ? T : 0, 0, total);
   const at = clipAt(timelineTime);
   if (!at) return null;
   const clip = project.clips[at.i];
-  const isFilm = project.adjust.effect === 2;
-  const profile = currentFilmProfile();
+  const adjust = renderOptions.adjust || project.adjust;
+  const isFilm = adjust.effect === 2;
+  const profile = currentFilmProfile(renderOptions.filmProfile);
   const seed = normalizeTextureSeed(project.textureSeed, project);
   // コマ落ち（v5-9）: 8mmのcadence機構を「青い記憶」「自分の色」でも使えるようにしたもの。
   // アイルMV実測は複製フレーム21.7%＝実効約19fps。judder=1でそこへ寄せる。
   // judder=0 のときは cadence=0 で従来と完全に同じ経路（回帰18本が不変であること）。
   // 音は間引かない（映像だけ）。時間契約そのものは変えず、コマの格子を足すだけ。
-  const judder = clamp(project.adjust.judder || 0, 0, 1);
-  const cadence = isFilm ? profile.fps : (judder > 0 ? 30 - 11 * judder : 0);
+  const judder = clamp(adjust.judder || 0, 0, 1);
+  // T8（2026-09-16 比較）: 薄明v2は profile.fps=0 でコマ落ちなし。開発URL `hkr006Cadence=19|24` のときだけ
+  // 青い記憶のコマ刻みと同じ格子（実効fps）を掛ける。通常URLは従来どおり0。
+  const hold = isFilm ? aoiCadenceHold(profile) : null;
+  const cadence = hold ? hold.base : isFilm ? (profile.fps || hakumeiCadenceOverride(profile)) : (judder > 0 ? 30 - 11 * judder : 0);
   // frame境界の位相だけ作品seedから定める。0 <= phase < 1 frame。
   const filmSeedPhase = cadence > 0 ? textureSeedUnit(seed, 0, 0x3df0ac19) / cadence : 0;
   const clipStartTimeline = sumBefore(at.i);
-  const filmFrame = cadence > 0 ? Math.floor((timelineTime + filmSeedPhase) * cadence) : null;
+  let filmFrame = cadence > 0 ? Math.floor((timelineTime + filmSeedPhase) * cadence) : null;
+  // HKR-008 5-3: 不規則なコマ保持。30fps基調で、seedで選んだコマを直前のコマで置き換える（連続は holdMax まで）。
+  // 元Airu実測: 60fps収録でコマ保持長4（＝1コマ保持）が約17%散発、実効24.8fps。規則的な格子ではない。
+  if (hold && filmFrame !== null) {
+    // 動くカットは保持を控えめにする（開発比較 `hkr008MovingHold=0.10,1`＝保持率,連続上限）。長い保持は速い被写体で「カットを挟んだ」ように見える。
+    const movingHold = aoiMovingHold(profile, clip);
+    const holdRate = movingHold ? movingHold.rate : hold.rate, holdMax = movingHold ? movingHold.max : hold.max;
+    let chain = 0;
+    while (chain < holdMax && filmFrame > 0 && textureSeedUnit(seed, filmFrame, 0x4c0de5e1) < holdRate) { filmFrame--; chain++; }
+  }
   const filmFrameStartT = cadence > 0 ? filmFrame / cadence - filmSeedPhase : timelineTime;
   // raw Tでclipを選ぶ。同じfilmFrame内はframe開始時刻からsourceを決めるが、
   // clip境界で新clipが選ばれた瞬間だけlocal 0へ戻す。
@@ -2449,8 +3850,65 @@ const BURN_LEN = 0.70;       // 旧: ロールエンドの長さ。v7-7でコマ
 //       4=橙焼け / 5=黒コマ / 6=ネガバーン / 7=暖色ウォッシュ
 // 語彙は adjust.effect で自動的に切り替わる（UIは増やさない＝選ぶのは世界観であってカタログではない）
 // FADEOUT は作品の最後の境目だけで使う「暗転して終わる」
-const TK = { NONE: 0, FLASH: 1, POP: 2, RAMP: 3, SCORCH: 4, BLACK: 5, BURN: 6, WASH: 7, FADEOUT: 8 };
+const TK = { NONE: 0, FLASH: 1, POP: 2, RAMP: 3, SCORCH: 4, BLACK: 5, BURN: 6, WASH: 7, FADEOUT: 8, HAKUMEI_LIGHT: 9 };
 // 手動上書きの文字列 → kind（effect文脈で解釈する）
+// HKR-008 段階2（色・階調）の比較候補。Astraの観察「暗部は青く深く形は残す／逆光は淡い黄白色」を
+// shadowTint（青）・highlightTint（暖）だけで表す。開発URL `hkr008Tone=weak|medium` で青い記憶v2に一時適用。
+const AOI_TONE_LEVELS = Object.freeze({
+  off:    Object.freeze({ shadowTint: [0, 0, 0], highlightTint: [0, 0, 0] }),
+  weak:   Object.freeze({ shadowTint: [-0.006, 0.000, 0.012], highlightTint: [0.010, 0.006, -0.008] }),
+  medium: Object.freeze({ shadowTint: [-0.012, 0.000, 0.024], highlightTint: [0.020, 0.012, -0.016] }),
+  strong: Object.freeze({ shadowTint: [-0.024, 0.000, 0.048], highlightTint: [0.040, 0.024, -0.032] }),
+});
+// HKR-008 段階5-2（膜と階調・全カット一定）: 黒を持ち上げ、全体コントラストを下げ、明部の彩度を落とし、明部色を中立へ。
+// 実測目標: 黒p1≈24／255、明部彩度≈0.07、明部R−B≈−6、微細コントラスト≈0.28。開発URL `hkr008Veil=mid|strong`。
+const AOI_SHADOW_LEVELS = Object.freeze({
+  desat: Object.freeze({ shadowTint: [-0.006, 0.000, 0.012] }),
+  cyan:  Object.freeze({ shadowTint: [-0.014, 0.008, 0.014] }),
+  cyanmid: Object.freeze({ shadowTint: [-0.013, 0.004, 0.019] }),   // 現状とcyanの中間
+});
+const AOI_VEIL_LEVELS = Object.freeze({
+  mid:    Object.freeze({ blackLift: 0.06, stockContrast: -0.08, highlightDesat: 0.40, highlightTint: [0.004, 0.004, 0.000] }),
+  strong: Object.freeze({ blackLift: 0.10, stockContrast: -0.14, highlightDesat: 0.60, highlightTint: [0.000, 0.000, 0.004] }),
+  midplus: Object.freeze({ blackLift: 0.04, stockContrast: -0.08, highlightDesat: 0.80, highlightTint: [0.000, 0.000, 0.004] }),
+});
+function profileStockTone(profile) {
+  const base = { stockContrast: profile.stockContrast || 0, stockSaturation: profile.stockSaturation || 0, blackLift: profile.blackLift || 0,
+    shoulder: profile.shoulder || 0, shadowTint: profile.shadowTint || [0, 0, 0], highlightTint: profile.highlightTint || [0, 0, 0],
+    highlightDesat: profile.highlightDesat || 0, shadowBlueToCyan: profile.shadowBlueToCyan || 0, blueFade: profile.blueFade || 0 };
+  if (!profile.mvLook) return base;
+  const query = new URLSearchParams(location.search);
+  if (!query.has('dev') || !query.has('hkr005')) return base;
+  const level = AOI_TONE_LEVELS[query.get('hkr008Tone')];
+  const veil = AOI_VEIL_LEVELS[query.get('hkr008Veil')];
+  let out = level ? { ...base, shadowTint: level.shadowTint, highlightTint: level.highlightTint } : base;
+  if (veil) out = { ...out, blackLift: out.blackLift + veil.blackLift, stockContrast: out.stockContrast + veil.stockContrast, highlightDesat: veil.highlightDesat, highlightTint: veil.highlightTint };
+  // 暗部の青の見え方（2026-09-17 比較）: desat=青みを半分、cyan=シアン寄り（Gを足しBを減らす）。実測ではAiruの暗部は青域56%・シアン域11%で、こちらは青域86%。
+  const shadow = AOI_SHADOW_LEVELS[query.get('hkr008Shadow')];
+  if (shadow) out = { ...out, shadowTint: shadow.shadowTint };
+  // 空・海の青を淡く: `hkr008BlueHue=20`（青→シアンへ20%＝12°）、`hkr008BlueFade=25`（青の彩度を25%落とす）。中間調〜明部だけ。
+  const hueShift = Number(query.get('hkr008BlueHue'));
+  if (Number.isFinite(hueShift) && hueShift > 0) out = { ...out, shadowBlueToCyan: clamp(hueShift / 100, 0, 1) };
+  const fade = Number(query.get('hkr008BlueFade'));
+  if (Number.isFinite(fade) && fade > 0) out = { ...out, blueFade: clamp(fade / 100, 0, 1) };
+  return out;
+}
+// HKR-008 段階5-1（粒子・輪郭）: 実測でv2は高周波が素材より多く（>1/2Nyq 2.2% vs Airu 0.97%）、微細コントラストがAiruの2.3倍。
+// 粒子を粗く少なく、輪郭を柔らかく。開発URL `hkr008Soft=mid|strong`。grain は描画値（adjust.grain 相当）。
+const AOI_SOFT_LEVELS = Object.freeze({
+  mid:    Object.freeze({ grain: 0.015, grainSize: 1.6, soften: 0.30, softRadius: 1.5 }),
+  strong: Object.freeze({ grain: 0.0125, grainSize: 2.0, soften: 0.45, softRadius: 2.0 }),
+});
+function aoiSoftOverride(profile) {
+  if (!profile?.mvLook) return null;
+  const query = new URLSearchParams(location.search);
+  if (!query.has('dev') || !query.has('hkr005')) return null;
+  return AOI_SOFT_LEVELS[query.get('hkr008Soft')] || null;
+}
+// つなぎの語彙を8mm系にするか。effect 2 でも青い記憶v2（mvLook）は青い記憶の語彙のまま。
+function filmTransitionVocab(adjust = project.adjust, profileKey) {
+  return adjust.effect === 2 && !currentFilmProfile(profileKey).mvLook;
+}
 function overrideKind(word, film) {
   if (word === 'none') return TK.NONE;
   if (word === 'flash') return film ? TK.POP : TK.FLASH;
@@ -2467,7 +3925,9 @@ function overrideKind(word, film) {
 // 比率どおりの枚数を配ってから並べ替え、同種が隣接したら後ろと入れ替える → 24/200まで下がる。
 let transPlanCache = null;
 function transPlan(amt, seed, film, n) {
-  const key = `${amt.toFixed(3)}|${seed}|${film}|${n}`;
+  // 青い記憶v2の境目の配分（HKR-008）: 元Airu実測（白へ飛ぶ32%・黒へ落ちる4%・ディゾルブ0・暖色の境目なし）に寄せる比較。
+  const mix = film ? null : aoiTransMix();
+  const key = `${amt.toFixed(3)}|${seed}|${film}|${n}|${mix ? mix.flash + ',' + mix.black : ''}`;
   if (transPlanCache && transPlanCache.key === key) return transPlanCache.plan;
   const slots = [];
   // 【2026-08-16 修正】本数を Math.round で決めていたため、期待値が0.5未満の語彙が
@@ -2485,6 +3945,10 @@ function transPlan(amt, seed, film, n) {
     push(TK.RAMP, count(n * 0.05 * amt));
     push(TK.SCORCH, count(n * 0.06 * amt));
     push(TK.BLACK, count(n * 0.05 * amt));
+  } else if (mix) {
+    push(TK.FLASH, count(n * mix.flash * amt));
+    push(TK.BLACK, count(n * mix.black * amt));
+    if (textureSeedUnit(seed, 0, 0x5ee0b17a) < 0.20 * amt) push(TK.BURN, 1);
   } else {
     push(TK.FLASH, count(n * 0.30 * amt));
     push(TK.WASH, count(n * 0.10 * amt));
@@ -2513,9 +3977,9 @@ function transPlan(amt, seed, film, n) {
   transPlanCache = { key, plan: slots };
   return slots;
 }
-function transKindAt(i, amt, seed, film) {
+function transKindAt(i, amt, seed, film, ignoreOverrides = false) {
   const left = project.clips[i - 1];
-  const ov = (project.transOverrides || []).find(x => x.leftClipId === left?.id);
+  const ov = ignoreOverrides ? null : (project.transOverrides || []).find(x => x.leftClipId === left?.id);
   if (ov && ov.kind && ov.kind !== 'auto') {
     const k = overrideKind(ov.kind, film);
     if (k !== null) return k;
@@ -2643,6 +4107,8 @@ function transSpan(f) {
 function spliceAt(timing, adjust) {
   const a = adjust || project.adjust;
   if (a.effect !== 2 || project.clips.length < 2) return 0;
+  // 薄明はeffect 2のlinear opticsだけを借りる。8mmの撮影由来ジャンプは基礎Lookへ入れない。青い記憶v2も同様。
+  if (isHakumeiProfile(timing.profile) || timing.profile?.mvLook) return 0;
   const cad = timing.cadence || 18;
   const seed = timing.seed;
   const T = timing.timelineTime;
@@ -2663,11 +4129,251 @@ function spliceAt(timing, adjust) {
   }
   return 0;
 }
+
+// HKR-006 T3: 保存された計画を再抽選せず、候補を45%以下・隣接なしへ機械的に絞る。
+function hakumeiLightBoundaryPlans(plan, level) {
+  if (!plan || !validHakumeiPlan(plan, project.clips) || !(level > 0)) return [];
+  const total = Math.max(0, project.clips.length - 1);
+  const maximum = Math.floor(total * 0.45); // 少なくとも55%はHard Cutのまま
+  if (!maximum) return [];
+  const byLeftId = new Map(plan.boundaryPlans.map(boundary => [boundary.leftClipId, boundary]));
+  const candidates = [];
+  for (let i = 1; i < project.clips.length; i++) {
+    const boundary = byLeftId.get(project.clips[i - 1].id);
+    if (boundary?.connection !== 'light-replacement') continue;
+    candidates.push({ i, boundary, rank: fnv1a32Utf8(`${plan.seed}:${boundary.leftClipId}:${boundary.rightClipId}:T3`) });
+  }
+  candidates.sort((a, b) => a.rank - b.rank || a.i - b.i);
+  const selected = [];
+  for (const candidate of candidates) {
+    if (selected.length >= maximum) break;
+    if (selected.some(existing => Math.abs(existing.i - candidate.i) <= 1)) continue; // 連続境界には置かない
+    selected.push(candidate);
+  }
+  return selected.sort((a, b) => a.i - b.i).map(({ i, boundary }) => ({
+    i,
+    kind: TK.HAKUMEI_LIGHT,
+    // T2の候補強度は保持し、描画時にだけ比較用の弱0.45を掛ける。
+    strength: clamp(boundary.strength * level, 0, 1),
+    length: clamp(boundary.length, 0.3, 0.9),
+    direction: boundary.direction,
+    color: boundary.color,
+    reason: boundary.reason,
+  }));
+}
+function hakumeiLightLevel(adjust, profile) {
+  const isHakumeiV2 = profile === 'hakumei-v2' || profile === FILM_PROFILES['hakumei-v2'];
+  if (!isHakumeiV2) return 0;
+  // 診断のHard Cut／Light比較だけは、保存値と無関係な明示値を使う。
+  if (adjust?.hakumeiPlanOverride && Number.isFinite(adjust.hakumeiLight)) return clamp(adjust.hakumeiLight, 0, 1);
+  // 比較採用までは通常OFF。誤採用版で0.45が保存されていても通常作品には反映しない。
+  const query = new URLSearchParams(location.search);
+  return query.has('dev') && query.has('hkr006LightPreview') ? HAKUMEI_LIGHT_COMPARE_LEVEL : 0;
+}
+
+// T4-A Film Breathは保存値を通常描画へ使わない。比較関数が明示したときだけ有効にするので、
+// 過去・新規を問わず通常作品の既定は厳密にOFFのままになる。
+function hakumeiFilmBreathLevel(adjust, profileKey) {
+  if (!isHakumeiProfile(profileKey)) return 0;
+  if (adjust?.hakumeiFilmBreathCompare === true && Number.isFinite(adjust.hakumeiFilmBreath))
+    return clamp(adjust.hakumeiFilmBreath, 0, 1);
+  // 実動画のHuman Look Checkだけは、dev限定URLで共通の通常描画・書き出し経路へ差し込む。
+  // 作品の保存値は読まず書かず、URLを外せば必ずOFFへ戻る。
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005')) {
+    if (query.get('hkr006FilmBreathPreview') === 'weak') return HAKUMEI_FILM_BREATH_LEVELS.weak;
+    if (query.get('hkr006FilmBreathPreview') === 'medium') return HAKUMEI_FILM_BREATH_LEVELS.medium;
+  }
+  return 0;
+}
+
+// T4-Bは既存アイル実測のhandheld()だけを比較時に薄明へ借りる。保存値を読まず書かず、
+// 開発用URLが無ければnullを返して通常のproject.adjust.handheldをそのまま使う。
+// ===== HKR-006 T6-D: 薄明v2のカット別手ブレゲート（2026-09-16 採用） =====
+// 静止した素材に青い記憶の手ブレ0.25、動く素材には0.10。区別は取り込み時に測る「隣接フレーム差」
+// （96×54の輝度で t と t+1/30秒 の平均絶対差、5時点の中央値）。しきい値は保存作品6本の実測から置いた。
+// 手ブレスライダーが0（薄明v2の既定）のときだけ効き、手で動かした値はそのまま優先する。
+const HAKUMEI_MOTION_GATE = Object.freeze({ still: 0.25, moving: 0.10, threshold: 0.033, version: 1 });
+// 実測（薄明 2026-09-07・中央値）: c2 0.0036／c1 0.0295 ＝静止、c3 0.0361／c4 0.0488／c5 0.0502／c6 0.0687 ＝動き。境目は c1 と c3 の間に置いた。
+const FRAME_STEP_FRACTIONS = [0.1, 0.3, 0.5, 0.7, 0.9];
+function validClipFrameStep(value) {
+  return value === undefined || (isRecord(value) && value.version === HAKUMEI_MOTION_GATE.version && Number.isFinite(value.median) && value.median >= 0 && value.median <= 1);
+}
+async function measureClipFrameStep(clip) {
+  if (clip.kind !== 'video' || !clip.video) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = OBSERVATION_WIDTH; canvas.height = OBSERVATION_HEIGHT;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  const grab = () => {
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(clip.video, 0, 0, canvas.width, canvas.height);
+    const px = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    const luma = new Float32Array(canvas.width * canvas.height);
+    for (let i = 0, k = 0; i < px.length; i += 4, k++) luma[k] = (0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]) / 255;
+    return luma;
+  };
+  const samples = [];
+  const maxT = Math.max(0, clip.dur - 0.1);
+  for (const fraction of FRAME_STEP_FRACTIONS) {
+    const t = clamp(clip.start + clipLen(clip) * fraction, 0, maxT);
+    await seekTo(clip.video, t); const a = grab();
+    await seekTo(clip.video, Math.min(maxT + 0.05, t + 1 / 30)); const b = grab();
+    let diff = 0; for (let i = 0; i < a.length; i++) diff += Math.abs(a[i] - b[i]);
+    samples.push(observationRound(diff / a.length));
+  }
+  try { await seekTo(clip.video, clip.start); } catch (e) { }
+  return { version: HAKUMEI_MOTION_GATE.version, median: observationRound(observationMedian(samples)), samples };
+}
+// 薄明v2の作品を開いたとき、隣接フレーム差を持たないカットだけを一度測る（追加のみ・他の観察値は触らない）。
+let frameStepSavePending = false;
+async function ensureHakumeiFrameSteps() {
+  if (project.adjust.effect !== 2 || !currentFilmProfile().motionGate) return 0;
+  let filled = 0;
+  for (const c of project.clips) {
+    if (c.kind !== 'video' || c.frameStep) continue;
+    try { const v = await measureClipFrameStep(c); if (v) { c.frameStep = v; filled++; } }
+    catch (e) { logErr('動き量を測れませんでした: ' + (c.name || c.id)); }
+  }
+  if (filled) { trace('frameStep.filled', () => ({ 本数: filled })); if (ready) markDirty(); else frameStepSavePending = true; }
+  return filled;
+}
+// 通常描画用。開発URLの上書きが無いときに、profile.motionGate の規則で呼ばれる。
+function motionGateHandheld(clip, still, moving, threshold) {
+  if (!clip) return 0;
+  if (clip.kind === 'photo') return still;
+  if (!clip.frameStep) return 0;
+  return clip.frameStep.median <= threshold ? still : moving;
+}
+function hakumeiMotionGateHandheld(clip) {
+  return motionGateHandheld(clip, HAKUMEI_MOTION_GATE.still, HAKUMEI_MOTION_GATE.moving, HAKUMEI_MOTION_GATE.threshold);
+}
+// profile.motionGate に従って、このカットの手ブレ強さを返す。null＝ゲートなし（従来どおりスライダー値）。
+function profileMotionGateHandheld(profile, clip, sliderValue) {
+  const gate = profile?.motionGate;
+  if (!gate) return null;
+  const query = new URLSearchParams(location.search);
+  if (query.has('dev') && query.has('hkr005') && query.get('hkr008MotionGate') === 'off') return null;
+  if (gate.mode === 'sliderZero') return sliderValue > 0 ? null : motionGateHandheld(clip, gate.still, gate.moving, gate.threshold);
+  // 開発比較: `hkr008Moving=0.04` で動くカットの手ブレ強さだけ差し替える（HKR-008 時間設計）
+  const devMoving = query.has('dev') && query.has('hkr005') && query.has('hkr008Moving') ? Number(query.get('hkr008Moving')) : NaN;
+  const moving = Number.isFinite(devMoving) ? clamp(devMoving, 0, 1) : gate.moving;
+  if (gate.mode === 'sliderStill') return sliderValue > 0 ? motionGateHandheld(clip, sliderValue, Math.min(sliderValue, moving), gate.threshold) : null;
+  return null;
+}
+
+// T6-B（2026-09-16）: `hkr006HandheldGate=c1:0.55,c2:0.55` でクリップIDごとに青い記憶の手ブレ関数の強さを渡す
+// （19fps刻み・並進・呼吸ズーム・端保護は青い記憶と同じ式）。未記載は `hkr006HandheldGateDefault`（既定0）。
+function hakumeiMovementPreviewHandheld(profileKey, clipId) {
+  if (!isHakumeiProfile(profileKey)) return null;
+  const query = new URLSearchParams(location.search);
+  if (!query.has('dev') || !query.has('hkr005')) return null;
+  if (query.has('hkr006HandheldGate')) {
+    const table = new Map(query.get('hkr006HandheldGate').split(',').map(pair => pair.split(':')).filter(x => x.length === 2).map(([id, v]) => [id.trim(), clamp(Number(v) || 0, 0, 1)]));
+    const fallback = clamp(Number(query.get('hkr006HandheldGateDefault')) || 0, 0, 1);
+    return table.has(String(clipId)) ? table.get(String(clipId)) : fallback;
+  }
+  if (query.get('hkr006MovementPreview') === 'calm') return 0.25;
+  if (query.get('hkr006MovementPreview') === 'airu') return 0.55;
+  return null;
+}
+
+// T4-B4: Human Look Checkで採用したT4-B3の26本。各値は元Airu固定物の
+// 30fps観察値を画面幅480・高さ204で量子化した横／縦移動で、外部JSONは実行時に読まない。
+// 2026-09-16: 通常のプレビュー・書き出しからは外し、`?dev=1&hkr005=1&hkr006AiruTrajectory=1` の比較だけで使う。
+const HAKUMEI_AIRU_TRAJECTORY_BANK = Object.freeze(`0,0|-1,0|-1,1|-1,1|-1,1|-1,1|-2,2|-1,2|-1,2|-1,2|-2,3|-2,3|-2,3|-2,3|-2,3|-2,2|-2,2|-1,1|-1,1;0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|1,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|3,0|3,0|3,0|3,0|3,0|3,0|3,0|4,1|4,1|4,1|4,1;0,0|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|1,-1|1,-1|1,-1|1,-1|2,-1|2,-1|2,-1|2,-1|2,-1|2,-1|2,-1|2,-1|2,-1|2,-1|2,-1|2,-1;0,0|1,0|1,0|1,0|1,0|1,0|1,0|2,0|2,0|2,0|2,1|2,1|4,0|5,1|5,1|6,2|6,2|5,2|5,2|5,2|5,2|6,2|6,2|6,2|6,2|6,2|6,2|6,2|5,2|5,2|5,2|5,2|4,2|4,2|4,2|4,2|4,2|4,2|4,2|4,2|5,2|5,2|5,3|5,3|5,3|4,3|4,3|4,3|3,3|2,3|2,3|2,3|2,3|2,3|2,3|2,3|2,3|2,2|2,2|2,2|2,3|1,3|1,3|1,3;0,0|4,0|4,0|4,-1|5,-1|0,1|0,1|0,1|3,3|3,3|3,3|-1,2|-6,3|-6,5|-6,5|-6,5|-9,3|-9,3|-9,3|-7,4|-9,3|-9,3|-9,3|-9,3|-13,2|-13,2|-16,2|-16,2|-16,1|-17,1|-18,1|-18,1|-13,1|-8,2|-8,2|-8,2|-7,2|-7,2|-7,1|-7,1|-12,1|-12,1|-14,2|-14,2|-14,2|-18,2|-18,2|-18,1|-16,3|-19,3|-17,3|-17,3|-17,3|-12,2|-11,2|-11,2|-16,2|-12,3|-12,3|-12,3|-10,4|-14,4|-14,4|-14,4|-15,4|-14,4|-13,3|-13,3|-13,3|-13,2|-13,2|-13,2|-13,1|-13,1|-13,0|-12,0|-12,1|-13,1|-16,1|-16,1;0,0|0,-5|0,-8|0,-8|-1,-8|-4,-6|-5,-6|-5,-6|-6,-6|-9,-4|-9,-4|-9,-4|-9,-4|-9,-4|-8,-3|-8,-3|-7,-2|-5,1|-4,2|-4,2|-3,2|-2,-1|-4,0|-4,0|-4,1|-4,2|-6,5|-6,5|-7,6|-7,7|-8,6|-8,6|-7,2|-6,-3|-11,-6|-11,-6|-11,-6|-9,-7|-13,-3|-13,-3;0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,1|0,1|0,1|1,1|0,1|0,1|0,1|0,1|-1,0|-1,0|-1,0|-1,-1|0,-1|0,-1|0,-1|1,-1|2,-1|2,-1|2,-1|2,-1|2,-1|2,-1|2,-1|2,-1|2,-2|2,-2|2,-2|2,-2|3,-2|3,-2|3,-2|3,-2|3,-2|3,-2|3,-2|3,-2|2,-2|2,-2|1,-1|1,-1|1,-1|1,-1|1,-1|1,-1|1,-1|1,-1|0,-1;0,0|0,0|1,0|1,0|1,0|1,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,0|2,1|2,1|2,1|2,1|2,1|2,1;0,0|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,-1|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|1,0|2,0|2,0|2,0;0,0|0,0|0,0|0,0|1,1|3,1|4,1|4,1|7,1|9,0|10,-1|10,-1|12,-3|14,-4|15,-4|15,-4|17,-4|19,-4|20,-4|20,-4|22,-3|23,-2|23,-1|23,-1|23,1|23,4|23,5|23,5|22,6|21,6|21,6|21,6|21,4|20,2|19,1|19,1|18,0|18,-1|18,-2|18,-2|18,-3|18,-3|18,-3|18,-3|17,-2|16,0|16,1|16,1|14,1|12,1|11,1|11,1|9,0|7,-1|6,-1|6,-1|5,-2|4,-2|4,-2|4,-2|4,-2|4,-2|4,-2|4,-2|5,-1|6,0|6,0|6,0|6,0|8,0|9,-1|9,-1|11,-2|12,-4|13,-5|13,-5|14,-6|15,-7|16,-7|16,-7|17,-7|18,-6|18,-6|18,-6|19,-5|20,-4|21,-3|21,-3|22,-1|23,2|23,3|23,3|22,5|21,6|20,6|20,6|18,6|16,6|15,6|15,6|13,6|11,6|11,6|10,6|8,6|6,6|5,6|5,6|4,7|4,8|4,9|4,9|5,11|6,13;0,0|0,0|-1,1|-3,2|-4,1|-4,1|-6,1|-9,0|-11,0|-11,0|-13,1|-18,4|-19,5|-19,5|-20,5|-17,4;0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|-1,-1|-1,-1;0,0|0,1|0,2|0,2|1,2|1,1|1,3|1,3|2,2|3,0|3,2|3,2|4,2|4,5|4,6|4,6|5,4|5,3|5,4|5,4|5,4|5,4;0,0|0,0|0,1|1,1|1,1|1,1|4,0|4,0|2,0|2,0|1,0|1,0|2,0|2,0|3,0|3,0;0,0|0,0|0,0|-1,1|-1,2|-1,2|-1,2|-2,2|-2,1|-2,1|-2,1|-1,2|0,2|0,2|0,2|2,2|2,2|2,2;0,0|0,0|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1;0,0|0,0|1,0|1,0|1,0|1,1|1,1|1,1|1,1|1,0|1,-1|1,-1|1,-1|1,-2|1,-2|1,-2|1,-2|1,-2|0,-2|0,-2;0,0|0,0|0,0|0,0|0,1|0,2|0,3|0,3|0,3|0,3|0,3|0,3|0,3|0,3|0,3|0,3|0,3|1,3|1,3|1,3|1,3|2,3|2,3|2,3|2,3|2,3|2,3|2,3;0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,1|0,2;0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0;0,0|0,0|0,0|1,1|1,1|1,1|1,1|0,1|-1,1|-1,1|-2,1|-2,1|-2,1|-2,1|-2,1|-3,1;0,0|0,1|0,1|0,1|0,1|-1,1|-1,1|-1,1|-1,1|-1,2|-1,2|-1,2|-1,2|-1,2|0,2|0,2|1,2|1,2;0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,0|0,1|0,1|0,1|0,1|0,2|-1,2|-1,2;0,0|0,0|-2,0|-3,1|-5,3|-5,3|-7,5|-8,6|-10,9|-10,9|-11,11|-12,11|-14,12|-14,12;0,0|0,0|-1,0|-2,0|-3,0|-3,0|-4,0|-5,1|-6,1|-6,1|-7,0|-8,0|-10,0|-10,0|-11,1|-11,1|-11,1|-11,1|-12,1|-12,0|-11,-1|-11,-1|-11,-1|-12,0|-14,2|-14,2|-13,2;0,0|0,1|0,1|0,1|0,1|-1,2|-2,2|-4,3|-4,3|-6,4|-7,4|-8,4|-8,4|-9,4|-9,4|-9,4` .split(';').map(path => Object.freeze(path.split('|').map(point => Object.freeze(point.split(',').map(Number))))));
+
+function hakumeiClipSalt(id) {
+  let h = 2166136261;
+  for (const ch of String(id || '')) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+function hakumeiAiruTrajectoryEnabled() {
+  const query = new URLSearchParams(location.search);
+  return query.has('dev') && query.has('hkr005') && query.get('hkr006AiruTrajectory') === '1';
+}
+
+// T6-A（2026-09-16）: カット別ゲートの比較用。`?dev=1&hkr005=1&hkr006MotionGate=c1:1,c2:1,c3:0.3` のように
+// クリップIDごとの実軌跡の倍率を渡す。書かれていないクリップは `hkr006MotionGateDefault`（既定0）。
+// 素材の動き量はオフラインで測って渡す前提で、アプリ内では測らない。通常URLではnullを返す。
+function hakumeiAiruMotionGate(clipId) {
+  const query = new URLSearchParams(location.search);
+  if (!query.has('dev') || !query.has('hkr005') || !query.has('hkr006MotionGate')) return null;
+  const table = new Map(query.get('hkr006MotionGate').split(',').map(pair => pair.split(':')).filter(x => x.length === 2).map(([id, v]) => [id.trim(), clamp(Number(v) || 0, 0, 1)]));
+  const fallback = clamp(Number(query.get('hkr006MotionGateDefault')) || 0, 0, 1);
+  return table.has(String(clipId)) ? table.get(String(clipId)) : fallback;
+}
+
+function hakumeiAiruMotionAt(timing, profileKey, seed) {
+  if (profileKey !== 'hakumei-v2' || !timing?.clip) return null;
+  const gate = hakumeiAiruMotionGate(timing.clip.id);
+  const amount = gate === null ? (hakumeiAiruTrajectoryEnabled() ? 1 : 0) : gate;
+  if (amount <= 0) return null;
+  const duration = Math.max(1 / 120, clipLen(timing.clip));
+  const lengths = HAKUMEI_AIRU_TRAJECTORY_BANK.map(path => path.length / 30);
+  const nearest = Math.min(...lengths.map(length => Math.abs(length - duration)));
+  const choices = lengths.map((length, index) => ({ length, index })).filter(x => Math.abs(x.length - duration) === nearest);
+  const choice = choices[Math.min(choices.length - 1, Math.floor(textureSeedUnit(seed, hakumeiClipSalt(timing.clip.id), 0x4b344001) * choices.length))].index;
+  const path = HAKUMEI_AIRU_TRAJECTORY_BANK[choice];
+  const at = clamp((timing.clipLocalTime / duration) * (path.length - 1), 0, path.length - 1);
+  const i = Math.floor(at), f = at - i, smooth = f * f * (3 - 2 * f), a = path[i], b = path[Math.min(i + 1, path.length - 1)];
+  // 画面上の固定物移動を、シェーダのサンプル座標方向へ反転して渡す。
+  // 端保護の1/1.18は倍率に関係なく固定し、比較で動く量だけを変える。
+  return { bankIndex: choice, amount, move: [-(a[0] + (b[0] - a[0]) * smooth) * amount / 480, -(a[1] + (b[1] - a[1]) * smooth) * amount / 204], scale: 1 / 1.18 };
+}
+
+// カットごとのlocal timeや19fpsのfilmFrameは使わない。作品全体のtimeline timeを直接読むため、
+// カット境界で位相が戻らず、プレビューと書き出しでも同じ値になる。
+function hakumeiFilmBreathAt(timelineTime, adjust, profileKey, seed) {
+  const level = hakumeiFilmBreathLevel(adjust, profileKey);
+  const period = 2 + textureSeedUnit(seed, 0, 0x4a7c159e) * 3; // 2〜5秒
+  const phase = textureSeedUnit(seed, 1, 0x4a7c159e) * Math.PI * 2;
+  const t = Math.max(0, Number(timelineTime) || 0);
+  const wave = Math.sin((t / period) * Math.PI * 2 + phase);
+  return {
+    level, period, phase,
+    exposure: wave * 0.12 * level,
+    temperature: Math.sin((t / period) * Math.PI * 2 + phase + 0.61) * 0.03 * level,
+    contrast: Math.sin((t / period) * Math.PI * 2 + phase - 0.37) * 0.03 * level,
+  };
+}
+function hakumeiDirectionVector(direction) {
+  return direction === 'left' ? [-1, 0] : direction === 'right' ? [1, 0]
+    : direction === 'up' ? [0, -1] : direction === 'down' ? [0, 1] : [0, 0];
+}
+function hakumeiTransitionAt(timing, adjust) {
+  const level = hakumeiLightLevel(adjust, timing.profile);
+  const plan = adjust.hakumeiPlanOverride || project.hakumeiPlan;
+  const candidates = hakumeiLightBoundaryPlans(plan, level);
+  if (!candidates.length) return null;
+  const T = timing.timelineTime;
+  let best = null;
+  for (const candidate of candidates) {
+    const boundaryAt = sumBefore(candidate.i);
+    const lead = candidate.length * 0.45, tail = candidate.length - lead;
+    const raw = T - boundaryAt;
+    if (raw < -lead || raw > tail) continue;
+    const phase = clamp((raw + lead) / candidate.length, 0, 1);
+    // 片側を急に消さず、境界の前後で同じ連続包絡にする。
+    const env = Math.sin(Math.PI * phase);
+    const face = {
+      dir: hakumeiDirectionVector(candidate.direction), grad: 1.15,
+      seed: textureSeedUnit(plan.seed, candidate.i, 0x6a09e667),
+      tint: candidate.color === 'warm' ? 1 : candidate.color === 'cool' ? -1 : 0,
+    };
+    const item = { kind: candidate.kind, phase, amt: env * candidate.strength, face,
+      recover: candidate.color === 'neutral' ? 0 : 0.08,
+      hakumei: { boundaryIndex: candidate.i, length: candidate.length, reason: candidate.reason } };
+    if (!best || item.amt > best.amt) best = item;
+  }
+  return best;
+}
 function transitionAt(timing, adjust) {
   const a = adjust || project.adjust;
+  if (isHakumeiProfile(timing.profile) && hakumeiLightLevel(a, timing.profile) > 0) return hakumeiTransitionAt(timing, a);
   const amt = a.trans || 0;
   if (amt <= 0 || project.clips.length < 1) return null;
-  const film = a.effect === 2;
+  const film = a.effect === 2 && !timing.profile?.mvLook;
   const seed = normalizeTextureSeed(project.textureSeed, project);
   const T = timing.timelineTime, cad = timing.cadence || 18;
   let best = null;
@@ -2677,7 +4383,7 @@ function transitionAt(timing, adjust) {
     const isLast = i >= project.clips.length;
     const bAt = sumBefore(i);
     if (T - bAt < -6 || T - bAt > 6) continue;      // 多重パルスは群れで数秒に及ぶ
-    let kind = transKindAt(i, amt, seed, film);
+    let kind = transKindAt(i, amt, seed, film, !!a.presetDraft);
     if (kind === TK.NONE) continue;
     // 最後の境目には「境界より後」でしか効かない語彙（白抜け・露出・焼け・黒コマ）を
     // 当てても、後ろに映像が無いので一度も見えない。終わりを作れる語彙へ寄せる。
@@ -2735,6 +4441,18 @@ function transitionAt(timing, adjust) {
       const len = f.atk * 2.0 + 0.35;
       if (raw < -len) continue;
       take({ kind, phase: 1, amt: clamp((raw + len) / len, 0, 1) * gain, face: f });
+    } else if (kind === TK.FLASH && !isLast && a.effect === 2 && aoiFlashFrames(timing.profile)) {
+      // フラッシュフレーム型（HKR-008 F1）。コマ番号は保持コマ込みのフィルムコマで数える（保持中に光だけ変わらない）。
+      const ffr = Math.floor((timing.filmFrameStartT - at) * cad + 1e-6);
+      // 作品内で同じ見え方を繰り返さない（2026-09-18 ユーザー）: この境目が何番目の白かを数え、seed で並べ替えた変種表から順に割り当てる。
+      let ordinal = 0;
+      for (let j = 1; j < i; j++) if (transKindAt(j, amt, seed, film, !!a.presetDraft) === TK.FLASH) ordinal++;
+      const variant = flashVariantAt(seed, ordinal);
+      const ff = flashFrameAt(ffr, f, Math.floor((at - prevB) * cad * 0.6), Math.floor((nextB - at) * cad * 0.6), variant);
+      // 入りの1コマ目は画面の一部（黄金角の向きの片側）から。元Airuの立ち上がりコマは最暗ブロック137〜200＝まだ全面に届いていない。
+      const over = aoiOverFloor(timing.profile, f, variant);
+      if (ff && over && ff.first) over.far = Math.max(over.far || 0, 0.35);
+      if (ff) take({ kind, phase: ff.phase, amt: ff.env * gain, face: f, recover: ff.recover, over });
     } else if (kind === TK.FLASH || kind === TK.BURN) {
       const span = transSpan(f);
       // 最後の境目は、おわりが白（黒）へ沈み終わるまで効かせる。
@@ -2791,13 +4509,21 @@ function transitionAt(timing, adjust) {
 }
 
 async function renderAtTimelineTime(T, sourceProvider, options = {}) {
-  const timing = getTimelineRenderTiming(T);
+  const timing = getTimelineRenderTiming(T, options.renderOptions);
   if (!timing) return null;
   const provided = await sourceProvider(timing);
   if (!provided?.source) return null;
   const pipe = options.pipe || preview;
+  const mainPreview = pipe === preview, startedAt = mainPreview ? performance.now() : 0;
   // テキストは作品時刻Tで決まる。プレビューも書き出しも同じここを通る
   const ro = options.renderOptions || {};
+  const autoAlign = ro.autoAlignOverride === undefined ? project.autoAlign : ro.autoAlignOverride;
+  const clipCorrection = ro.bypassLook ? null : clipAutoCorrectionAt(timing, autoAlign);
+  const drawOptions = ro.bypassLook ? ro : { ...ro, clipCorrection, filmBreathTimelineTime: timing.timelineTime,
+    airuMotion: (ro.adjust || project.adjust).effect === 2 ? hakumeiAiruMotionAt(timing, ro.filmProfile || project.filmProfile, timing.seed) : null,
+    harmony: (ro.adjust || project.adjust).effect === 2 ? hakumeiHarmonyAt(timing, ro.filmProfile || project.filmProfile) : null,
+    style: (ro.adjust || project.adjust).effect === 2 ? aoiStyleAt(timing, currentFilmProfile(ro.filmProfile || project.filmProfile)) : null,
+    texts: ro.texts || textsAt(timing.timelineTime, timing.cadence), trans: transitionAt(timing, ro.adjust), spliceY: spliceAt(timing, ro.adjust), endAmt: endingAmt(timing.timelineTime, ro.adjust) };
   await pipe.draw(
     provided.source,
     provided.width || timing.clip.w,
@@ -2805,8 +4531,15 @@ async function renderAtTimelineTime(T, sourceProvider, options = {}) {
     provided.rot || 0,
     timing.effectTime,
     timing.clip,
-    ro.bypassLook ? ro : { ...ro, texts: ro.texts || textsAt(timing.timelineTime, timing.cadence), trans: transitionAt(timing, ro.adjust), spliceY: spliceAt(timing, ro.adjust), endAmt: endingAmt(timing.timelineTime, ro.adjust) },
+    drawOptions,
   );
+  if (mainPreview) trace('preview.rendered', () => ({
+    ms: Math.round(performance.now() - startedAt), clip: project.clips.indexOf(timing.clip),
+    T: +timing.timelineTime.toFixed(3), sourceT: +timing.localSourceTime.toFixed(3),
+    upload: preview.uploadMode, quality: preview.qualityPath,
+    bypass: !!ro.bypassLook, exposure: +(project.adjust.exposure + (clipCorrection?.bright ?? clipBrightOf(timing.clip))).toFixed(3),
+    temp: +(clipCorrection?.temp ?? clipTempOf(timing.clip)).toFixed(3), handoff: +(clipCorrection?.handoff ?? 1).toFixed(3), autoAlign: project.autoAlign,
+  }));
   return timing;
 }
 
@@ -3026,6 +4759,7 @@ function endDrag(e) {
     if (cur !== target) {
       project.clips.splice(cur, 1);
       project.clips.splice(target, 0, d.clip);
+      refreshHakumeiPlanIfPresent();
       markDirty();
       commitHistory(d.historyBefore);
     }
@@ -3037,6 +4771,7 @@ function endDrag(e) {
   }
   // トリム終了。編集した側の端に再生位置を残す
   renderTimeline(); renderClipEdit();
+  invalidateHakumeiPlanForTrim();
   markDirty();
   commitHistory(d.historyBefore);
   const i = project.clips.indexOf(d.clip);
@@ -3144,7 +4879,7 @@ function drawStill(clip) {
       exposure: +(project.adjust.exposure + clipBrightOf(clip)).toFixed(3),
       temp: +clipTempOf(clip).toFixed(3), autoAlign: project.autoAlign }));
     return { source: clipSource(timing.clip), width: timing.clip.w, height: timing.clip.h };
-  }, bypassLook ? { renderOptions: { bypassLook: true } } : {})
+  }, currentPreviewOptions())
     .then(() => syncTextFrame())    // 画が変わったら、選んでいる文字の枠も合わせ直す
     .catch(e => { if (!playing) logErr('プレビュー: ' + e.message); });
 }
@@ -3261,11 +4996,13 @@ function textAtPoint(e) {
 
 // ===== プレビュー長押し＝調整前を見る =====
 // タイムライン側の長押しは並べ替えに使っているので、こちらはプレビューに置く（Lightroomと同じ作法）。
+// 長押し比較・文字のつかみ移動のあとに出る click を「再生／停止のタップ」と取り違えないための時刻
+let previewGestureEnd = 0;
 {
   const box = $('previewBox');
   let holdTimer = 0, holding = false;
   const start = e => {
-    if (playing || exporting || !project.clips.length) return;
+    if (playing || exporting || !project.clips.length || document.body.classList.contains('ui-screen03') || document.body.classList.contains('ui-fullscreen')) return;
     const x0 = e.clientX, y0 = e.clientY;
     // 文字の上から始まったら、指で直接つかんで動かす（写真文字入れアプリと同じ触り方）
     // 文字の上をきっちり押せなくても動かせるようにする。
@@ -3318,6 +5055,7 @@ function textAtPoint(e) {
         box.removeEventListener('pointerup', up);
         box.removeEventListener('pointercancel', up);
         showSnapGuides(null);
+        previewGestureEnd = performance.now();
         // 動かさずに離した＝タップ。その文字を書きかえる（プレビューを直に触って直せるように）
         if (!moved && ev.type === 'pointerup') { openTextInput(); return; }
         if (moved) { commitHistory(before); markDirty(); }
@@ -3341,6 +5079,7 @@ function textAtPoint(e) {
       box.removeEventListener('pointercancel', end);
       box.removeEventListener('pointerleave', end);
       if (!holding) return;
+      previewGestureEnd = performance.now();
       holding = false; bypassLook = false;
       $('beforeBadge').hidden = true;
       redraw();
@@ -3355,6 +5094,9 @@ function textAtPoint(e) {
 
 // ===== 再生 =====
 let playing = false, playIdx = 0, rafId = 0, lastPreviewRenderKey = null;
+// 境目では次のvideoをシークしてから再生する。その途中で次のsourceを描くと、
+// 古い位置のフレームが一度だけ出て加工が外れたように見える。準備中は直前の
+// 加工済みcanvasを保ち、次の映像が再生可能になってから描画を再開する。
 let photoT0 = 0, photoElapsed = 0, advancing = false, playTimer = 0;
 // 再生したままタイムラインを触っている間（プレビューは指に追従し、離した位置から再生を続ける）
 let scrubbing = false;
@@ -3521,6 +5263,8 @@ async function play() {
   playing = true;
   playIdx = at.i;
   $('playBtn').textContent = '❚❚';
+  syncPlaybackButtons();
+  onPlaybackStarted();
   await ensureMusicBuffer().catch(e => logErr('音楽: ' + e.message));
   if (audioCtx?.state === 'suspended') await audioCtx.resume();
   if (musicAudioBuf) startMusic(timelinePos);
@@ -3534,6 +5278,7 @@ async function play() {
   playTimer = setInterval(() => {
     if (!playing) return;
     if (endingRun) { advanceEnding(); return; }
+    if (advancing) return;
     syncPlayhead(); checkAdvance();
   }, 100);
   loop();
@@ -3568,18 +5313,22 @@ function advanceEnding() {
 }
 function loop() {
   if (!playing) return;
+  // 次のクリップの頭出し中は、未シークのvideoをGLへ渡さない。最後に描けた
+  // 加工済みフレームをそのまま見せ、準備完了後の最初のフレームから切り替える。
+  if (advancing) { rafId = requestAnimationFrame(loop); return; }
   const c = project.clips[playIdx];
   if (endingRun) {
     // おわりの間はクリップが進まないので、時計で位置を進めて最後のコマを描き続ける
     if (advanceEnding()) {
-      const timing = getTimelineRenderTiming(timelinePos);   // 進めるのはタイマーと共通の関数
+      const previewOptions = currentPreviewOptions();
+      const timing = getTimelineRenderTiming(timelinePos, previewOptions.renderOptions);   // 進めるのはタイマーと共通の関数
       if (timing && clipReady(timing.clip)) {
         const key = `end:${Math.floor(timing.timelineTime * 30)}`;
         if (key !== lastPreviewRenderKey) {
           lastPreviewRenderKey = key;
           void renderAtTimelineTime(timing.timelineTime, async t => ({
             source: clipSource(t.clip), width: t.clip.w, height: t.clip.h,
-          })).catch(e => logErr('プレビュー: ' + e.message));
+          }), previewOptions).catch(e => logErr('プレビュー: ' + e.message));
         }
       }
       rafId = requestAnimationFrame(loop);
@@ -3589,7 +5338,8 @@ function loop() {
   if (c) {
     // wall clockはcurrentLocalの再生進行にだけ使い、描画は常に作品時間から決める。
     syncPlayhead();
-    const timing = getTimelineRenderTiming(timelinePos);
+    const previewOptions = currentPreviewOptions();
+    const timing = getTimelineRenderTiming(timelinePos, previewOptions.renderOptions);
     if (timing && clipReady(timing.clip)) {
       // 8mmは同一film frameを再描画しない。通常効果も30fps作品tickで間引くだけで、
       // shaderのtimeへ壁時計を渡さない。
@@ -3601,7 +5351,7 @@ function loop() {
         lastDrawn = timing.clip;
         void renderAtTimelineTime(timing.timelineTime, async t => ({
           source: clipSource(t.clip), width: t.clip.w, height: t.clip.h,
-        })).catch(e => logErr('プレビュー: ' + e.message));
+        }), previewOptions).catch(e => logErr('プレビュー: ' + e.message));
       }
     }
     checkAdvance();
@@ -3622,13 +5372,68 @@ function stopPlayback(atEnd) {
   $('playBtn').textContent = '▶';
   if (atEnd) { timelinePos = timelineDur(); syncPlayheadScroll(); }
   updateTimeLabel();
+  syncPlaybackButtons();
+  onPlaybackStopped(!!atEnd);
 }
 function updateTimeLabel() {
   $('timeLabel').textContent = `${fmt(clamp(timelinePos, 0, timelineDur()))} / ${fmt(timelineDur())}`;
+  const seek = $('screenSeek'), label = $('screenTime');
+  if (seek) { seek.max = String(Math.max(0, timelineDur())); seek.value = String(clamp(timelinePos, 0, timelineDur())); }
+  if (label) label.textContent = `${fmt(clamp(timelinePos, 0, timelineDur()))} / ${fmt(timelineDur())}`;
 }
 $('playBtn').onclick = () => playing ? stopPlayback() : play();
 
 // ===== mp4box =====
+function readIsoBox(view, start, limit) {
+  if (start < 0 || start + 8 > limit) return null;
+  let size = view.getUint32(start);
+  let headerSize = 8;
+  if (size === 1) {
+    if (start + 16 > limit) return null;
+    const high = view.getUint32(start + 8);
+    const low = view.getUint32(start + 12);
+    if (high > 0x1fffff) return null;
+    size = high * 0x100000000 + low;
+    headerSize = 16;
+  } else if (size === 0) size = limit - start;
+  if (size < headerSize || start + size > limit) return null;
+  const type = String.fromCharCode(
+    view.getUint8(start + 4), view.getUint8(start + 5),
+    view.getUint8(start + 6), view.getUint8(start + 7),
+  );
+  return { start, size, headerSize, type, end: start + size };
+}
+
+// 古いmp4box.jsはQuickTime式（FullBox headerなし）のmoov/metaをFullBoxとして読み、
+// 先頭のhdlr sizeを飛ばしてconsole errorにする。アプリが使わない撮影metadataだけを
+// 同じサイズのfree boxとして渡し、track・sample・colr・回転情報はそのまま解析する。
+function prepareMp4BufferForParser(buffer) {
+  const input = new DataView(buffer);
+  let output = null;
+  let topOffset = 0;
+  while (topOffset < input.byteLength) {
+    const top = readIsoBox(input, topOffset, input.byteLength);
+    if (!top) break;
+    if (top.type === 'moov') {
+      let childOffset = top.start + top.headerSize;
+      while (childOffset < top.end) {
+        const child = readIsoBox(input, childOffset, top.end);
+        if (!child) break;
+        if (child.type === 'meta') {
+          const firstChild = readIsoBox(input, child.start + child.headerSize, child.end);
+          if (firstChild?.type === 'hdlr') {
+            output ||= buffer.slice(0);
+            new Uint8Array(output, child.start + 4, 4).set([0x66, 0x72, 0x65, 0x65]);
+          }
+        }
+        childOffset = child.end;
+      }
+    }
+    topOffset = top.end;
+  }
+  return output || buffer;
+}
+
 function getDescription(mp4, trackId) {
   const trak = mp4.getTrackById(trackId);
   for (const entry of trak.mdia.minf.stbl.stsd.entries) {
@@ -3641,8 +5446,8 @@ function getDescription(mp4, trackId) {
   }
   return null;
 }
-async function demux(blob) {
-  const buf = await blob.arrayBuffer();
+async function parseMp4Info(blob) {
+  const buf = prepareMp4BufferForParser(await blob.arrayBuffer());
   buf.fileStart = 0;
   const mp4 = MP4Box.createFile();
   const info = await new Promise((res, rej) => {
@@ -3651,6 +5456,10 @@ async function demux(blob) {
     mp4.appendBuffer(buf);
     mp4.flush();
   });
+  return { mp4, info };
+}
+async function demux(blob) {
+  const { mp4, info } = await parseMp4Info(blob);
   const track = info.videoTracks[0];
   if (!track) throw new Error('動画トラックが見つからない');
   let rot = 0;
@@ -3670,11 +5479,36 @@ async function demux(blob) {
   return { track, samples, desc, rot };
 }
 
+function inspectVideoHdrMetadata(track) {
+  // mp4boxの版やcodecにより格納名が異なるため、色metadataの候補だけを小さく集約する。
+  const color = track?.color || track?.video?.color || track?.video?.colorSpace || null;
+  let text = '';
+  try { text = JSON.stringify(color || {}).toLowerCase(); } catch (e) { text = String(color || '').toLowerCase(); }
+  const values = [];
+  const walk = (value, path = '') => {
+    if (!value || typeof value !== 'object') return;
+    for (const [key, child] of Object.entries(value)) {
+      const childPath = path ? `${path}.${key}` : key;
+      if (typeof child === 'number' || typeof child === 'string') values.push({ path: childPath.toLowerCase(), value: child });
+      else walk(child, childPath);
+    }
+  };
+  walk(color);
+  const numericHdr = values.some(entry => {
+    const number = Number(entry.value);
+    return (/(primar|colour.*prim)/.test(entry.path) && number === 9)
+      || (/(transfer|trc|characteristic)/.test(entry.path) && (number === 16 || number === 18))
+      || (/(matrix|matrices)/.test(entry.path) && (number === 9 || number === 10));
+  });
+  const hdrSuspected = numericHdr || /(bt[ ._-]?2020|pq|hlg|smpte[ ._-]?2084|arib)/.test(text);
+  if (hdrSuspected) return { status: 'suspected', hdrSuspected: true, metadata: color, reason: 'hdr-color-metadata' };
+  if (color && values.length) return { status: 'sdr', hdrSuspected: false, metadata: color, reason: 'non-hdr-color-metadata' };
+  return { status: 'unknown', hdrSuspected: false, metadata: null, reason: 'metadata-unavailable' };
+}
+
 function warnHdrTrackIfDetected(track) {
   // mp4boxが読める色metadataだけを使う。読めない素材をHDRと断定せず、既存のSDR推奨表示を残す。
-  const color = track?.color || track?.video?.color || track?.video?.colorSpace || {};
-  let text = ''; try { text = JSON.stringify(color).toLowerCase(); } catch (e) { text = String(color).toLowerCase(); }
-  if (!/(bt[ ._-]?2020|pq|hlg|smpte[ ._-]?2084|arib)/.test(text)) return;
+  if (!inspectVideoHdrMetadata(track).hdrSuspected) return;
   const message = 'HDR/PQ/HLG/BT.2020の可能性がある素材です。自動補正ではなくSDR変換後の確認をおすすめします。';
   logErr(message);
   $('exportWarnings').textContent = message;
@@ -3834,6 +5668,21 @@ async function createVideoFrameCursor(clip) {
         throw e;
       }
     },
+    // 比較診断はframeAt()が実際に選んだpresentation frameのPTS区間を読むだけで、
+    // 通常書き出しの選択・描画経路は変えない。
+    frameInfo(frame) {
+      if (!current || current.frame !== frame) throw new Error('選択frameのPTS情報を保持できません');
+      // この関数は比較closureの外にあり、下側の同名finiteNumber()（真偽値判定）を
+      // 見る。durationをbooleanへ縮めず、WebCodecsが返したµs値をそのまま検証する。
+      const durationUs = Number(frame.duration);
+      if (!Number.isFinite(durationUs) || durationUs <= 0) throw new Error('選択frameのdurationを取得できません');
+      return {
+        actualPtsUs: frame.timestamp,
+        sourcePtsUs: current.sourceUs,
+        durationUs,
+        sourceIntervalUs: [current.sourceUs, current.sourceUs + durationUs],
+      };
+    },
     stats: () => ({ maxDepth, depth: future.length, decodedFrames, duplicateFrames, staleFrames, queueLimit: MAX_FUTURE_FRAMES, error: decoderError?.message || null }),
     dispose: shutdown,
   };
@@ -3841,7 +5690,7 @@ async function createVideoFrameCursor(clip) {
 
 // muxer出力をもう一度MP4として読み、video/audioの終端を同じ単位(µs)で検査する。
 async function inspectMuxEnds(blob) {
-  const buf = await blob.arrayBuffer();
+  const buf = prepareMp4BufferForParser(await blob.arrayBuffer());
   buf.fileStart = 0;
   const mp4 = MP4Box.createFile();
   const info = await new Promise((res, rej) => {
@@ -4141,37 +5990,29 @@ $('goExportBtn').onclick = () => switchTab('export');
 $('retrySaveBtn').onclick = () => { if (ready) saveState(); };
 
 // ===== プリセット =====
-function applyPreset(name) {
+function applyPreset(name, options = {}) {
   const p = PRESETS[name];
   if (!p) return;
   const historyBefore = project.id ? beginHistory() : null;
   const changesFrame = p.aspect && p.aspect !== project.aspect;
   const what = changesFrame ? '比率・見た目・音の設定' : '見た目・音の設定';
-  if (project.clips.length && !confirm(`素材と並びは残ります。${what}を「${PRESET_LABELS[name]}」に変更しますか？`)) return false;
+  if (!options.silent && project.clips.length && !confirm(`素材と並びは残ります。${what}を「${PRESET_LABELS[name]}」に変更しますか？`)) return false;
   // 収め方（contain/cover）は素材の向きに合わせて使うものなので、プリセットでは戻さない
-  if (p.aspect) project.aspect = p.aspect;
+  // lookOnly（SCREEN 03のLook変更）: プレビューに映らないもの＝縦横・音・取り込み長さ・自動そろえは変えない。
+  // 「タップ=プレビュー、適用=確定」の契約は「見えたものが確定する」が前提（UI設計正本 §8）
+  if (p.aspect && !options.lookOnly) project.aspect = p.aspect;
   project.effectPreset = p.effect;
-  project.adjust.effect = p.effect;
-  project.adjust.letterbox = p.letterbox;
-  if (p.effect === 2) applyFilmProfileRecommendations(p.filmProfile || 'home8');
-  else {
-    project.adjust.grain = FX[p.effect].gAmt / 400;
-    project.adjust.grainSize = FX[p.effect].gSize / 100;
-    project.adjust.glow = FX[p.effect].gGlow / 100;
-    project.adjust.halation = FX[p.effect].gHal / 100;
-    project.adjust.damage = 0;
-  }
-  // 「動き」もその作品らしい値で入る。理念＝完成イメージを選べば、あとは強弱だけで書き出せる。
-  // 既存作品を開く経路（hydrateProject）は通らないので、勝手に揺れ始めることはない
-  const motion = MOTION_RECOMMEND[name];
-  if (motion) for (const k of MOTION_KEYS) project.adjust[k] = motion[k];
+  project.adjust = presetAdjust(p);
+  if (p.effect === 2) project.filmProfile = FILM_PROFILES[p.filmProfile] ? p.filmProfile : 'home8';
   // 完成イメージを選び直したら、境目の手動指定は白紙に戻す（前の世界観の指定が残ると混ざる）。
   // 語彙はeffectで切り替わるので、8mm用の「黒コマ」が青い記憶に残っていると解釈できない
   project.transOverrides = [];
   transPlanCache = null;
-  project.muteAll = p.muteAll;
-  project.autoAlign = p.autoAlign;
-  project.impLen = p.impLen;
+  if (!options.lookOnly) {
+    if (typeof p.muteAll === 'boolean') project.muteAll = p.muteAll;
+    if (typeof p.autoAlign === 'boolean') project.autoAlign = p.autoAlign;
+    if (Number.isFinite(p.impLen)) project.impLen = p.impLen;
+  }
   const wantLut = p.lut;
   const has = wantLut === 'mine' ? project.mineLutData : wantLut === 'airu' ? project.airuLutData : wantLut === 'film8' ? project.film8LutData : true;
   project.lut = has ? wantLut : 'hikari';
@@ -4187,7 +6028,9 @@ function applyPreset(name) {
   return true;
 }
 $('presetDiary').onclick = async () => { const made = creatingNewProject || !project.id ? await newProjectFromPreset('diary') : applyPreset('diary'); if (made !== false) { creatingNewProject = false; closePresetSheet(); } };
+$('presetHakumei').onclick = async () => { const made = creatingNewProject || !project.id ? await newProjectFromPreset('hakumei') : applyPreset('hakumei'); if (made !== false) { creatingNewProject = false; closePresetSheet(); } };
 $('presetMv').onclick = async () => { const made = creatingNewProject || !project.id ? await newProjectFromPreset('mv') : applyPreset('mv'); if (made !== false) { creatingNewProject = false; closePresetSheet(); } };
+$('presetMv2').onclick = async () => { const made = creatingNewProject || !project.id ? await newProjectFromPreset('mv2') : applyPreset('mv2'); if (made !== false) { creatingNewProject = false; closePresetSheet(); } };
 $('presetFilm8').onclick = async () => { const made = creatingNewProject || !project.id ? await newProjectFromPreset('film8') : applyPreset('film8'); if (made !== false) { creatingNewProject = false; closePresetSheet(); } };
 $('lookPresets').querySelectorAll('[data-preset]').forEach(btn => btn.onclick = () => {
   // 選んだらたたむ。次に変えたくなるまで場所を取らない
@@ -4203,9 +6046,12 @@ $('presetSheet').addEventListener('click', e => { if (e.target.id === 'presetShe
 // 同じタブをもう一度押すと閉じる（プレビューを広く使えるように）
 function switchTab(name, forceOpen) {
   const cur = document.querySelector('.panel.on')?.id.replace('panel-', '');
-  const close = !forceOpen && cur === name;
+  const close = !document.body.classList.contains('ui-editor-v2') && !forceOpen && cur === name;
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', !close && b.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('on', !close && p.id === 'panel-' + name));
+  document.body.classList.toggle('develop-active', !close && name === 'color');
+  document.body.classList.toggle('clips-active', !close && name === 'clips');
+  if (!close && name === 'color' && document.body.classList.contains('ui-editor-v2')) renderDevelopPanel();
   if (!close && name === 'export') { updateDurationUI(); updateExportSummary(); }
   if (!close && name === 'text') {
     buildTextPanel(); syncTextPanel();
@@ -4260,7 +6106,7 @@ $('importToggle').onclick = () => {
   syncImportBadge();
 };
 function syncImportBadge() {
-  const len = { 0: '全部', 2: '2秒', 3: '3秒', 5: '5秒' }[project.impLen] ?? `${project.impLen}秒`;
+  const len = { 0: '全部', 1: '1秒', 2: '2秒', 3: '3秒', 4: '4秒', 5: '5秒' }[project.impLen] ?? `${project.impLen}秒`;
   const fit = project.fit === 'cover' ? '画面いっぱい' : '切れないように';
   $('importToggle').querySelector('b').textContent = $('importRows').hidden ? `${len}・${fit}` : '';
 }
@@ -4277,13 +6123,13 @@ function deselectClip() {
 }
 
 $('addClipBtn').onclick = () => $('addMenu').classList.toggle('on');
-$('addVideoBtn').onclick = () => { $('addMenu').classList.remove('on'); $('fileInput').click(); };
-$('addPhotoBtn').onclick = () => { $('addMenu').classList.remove('on'); $('photoFileInput').click(); };
+$('addVideoBtn').onclick = () => { $('addMenu').classList.remove('on'); if (importBusy) setProjectStatus('素材を取り込み中です。終わってからもう一度追加してください'); else $('fileInput').click(); };
+$('addPhotoBtn').onclick = () => { $('addMenu').classList.remove('on'); if (importBusy) setProjectStatus('素材を取り込み中です。終わってからもう一度追加してください'); else $('photoFileInput').click(); };
 document.addEventListener('click', e => {
   if (!e.target.closest('#addClipWrap')) $('addMenu').classList.remove('on');
 });
-$('fileInput').onchange = e => { addFiles([...e.target.files], 'video'); e.target.value = ''; };
-$('photoFileInput').onchange = e => { addFiles([...e.target.files], 'photo'); e.target.value = ''; };
+$('fileInput').onchange = e => { const files = [...e.target.files]; e.target.value = ''; if (document.body.classList.contains('ui-home')) showConfirm(files); else void runFileImport(files, 'video'); };
+$('photoFileInput').onchange = e => { void runFileImport([...e.target.files], 'photo'); e.target.value = ''; };
 
 $('aspectSel').onchange = () => {
   project.aspect = $('aspectSel').value;
@@ -4423,7 +6269,7 @@ $('motionCards').addEventListener('click', e => {
 $('transAll').onclick = () => {
   if (project.clips.length < 1) return;
   const before = beginHistory();
-  const film = project.adjust.effect === 2;
+  const film = filmTransitionVocab();
   const seed = normalizeTextureSeed(project.textureSeed, project);
   // つなぎ自体がOFFなら入れる（ボタン1つで完結させる）
   if (!(project.adjust.trans > 0)) project.adjust.trans = motionRecommend('trans');
@@ -4470,7 +6316,8 @@ $('transAll').onclick = () => {
 // 【2026-08-16 追加】乱数の種を引き直す。境目ごとの方向（黄金角の初期角）・頂上の長さ・
 // 単発か2回か・勾配・回復色・語彙の配分が、すべてこの種から決まっているので一度に変わる。
 // 手で決めた境目（transOverrides）は残す＝「ここは光」と決めた指定を壊さない。
-$('reseed').onclick = () => {
+// SCREEN 03の「別の仕上がり」もこの既存経路を使い、seed以外の値は触らない。
+function reseedProject() {
   const before = beginHistory();
   let next = (Math.random() * 0xffffffff) >>> 0;
   const cur = normalizeTextureSeed(project.textureSeed, project);
@@ -4480,7 +6327,8 @@ $('reseed').onclick = () => {
   commitHistory(before);
   renderTimeline(); markDirty(); redraw(); scheduleSave();
   logErr('出方を引き直しました（↶で戻せます）');
-};
+}
+$('reseed').onclick = reseedProject;
 $('transNone').onclick = () => {
   if (project.clips.length < 1) return;
   const before = beginHistory();
@@ -4500,10 +6348,10 @@ function syncMotionUI() {
     const v = project.adjust[c.key] || 0;
     // 8mmは16fpsのcadenceが常時かかるのでコマ落ちは効かない。
     // 隠すと「消えた」と混乱するので、出したまま無効にして理由を書く（v5-16の「隠す」から変更）
-    const dis = film && c.key === 'judder';
+    const dis = film && currentFilmProfile().fps > 0 && c.key === 'judder';
     card.classList.toggle('dis', dis);
     card.querySelectorAll('button').forEach(b => { b.disabled = dis; });
-    card.querySelector('.ds').textContent = dis ? '8mmは元から16fps'
+    card.querySelector('.ds').textContent = dis ? `${currentFilmProfile().fps}fpsが元から有効`
       : { handheld: '手持ちのゆれ', leak: '端からの光漏れ', trans: 'カットの光・焼け', judder: 'フィルムのカクつき', vig: '四すみの落ち', endDur: '最後の余韻' }[c.key];
     if (dis && v) { project.adjust[c.key] = 0; }
     const val = project.adjust[c.key] || 0;
@@ -4615,7 +6463,7 @@ function syncChipBadges() {
     if (b) b.textContent = Math.round(parseFloat(el.value));
   });
   const prof = document.querySelector('#fxParams [data-slider=filmProfileSel] b');
-  if (prof) prof.textContent = { home8: 'ホーム', super8_reversal: 'リバーサル', super8_negative: 'ネガ' }[project.filmProfile] || '';
+  if (prof) prof.textContent = { home8: 'ホーム', super8_reversal: 'リバーサル', super8_negative: 'ネガ', 'hakumei-v1': '薄明 v1', 'hakumei-v2': '薄明 v2' }[project.filmProfile] || '';
   if (activeTool === 'align') syncAlignReadout();
   if ($('panel-text').classList.contains('on')) syncTextPanel();
 }
@@ -5339,7 +7187,7 @@ function syncMusicHint() {
 $('muteAllChk').onchange = () => {
   project.muteAll = $('muteAllChk').checked;
   project.clips.forEach(c => { if (c.kind === 'video') c.video.muted = project.muteAll || c.muted; });
-  renderTimeline(); renderClipEdit(); scheduleSave();
+  renderTimeline(); renderClipEdit(); syncScreenMusicUi(); scheduleSave();
 };
 
 document.querySelectorAll('#lutChips .chip').forEach(chip => {
@@ -5434,12 +7282,14 @@ $('filmProfileSel').onchange = () => {
   });
 }
 
-$('musicBtn').onclick = () => $('musicFileInput').click();
+$('musicBtn').onclick = () => { if (importBusy) setProjectStatus('素材を取り込み中です。終わってからもう一度追加してください'); else $('musicFileInput').click(); };
 $('musicFileInput').onchange = async e => {
   const f = e.target.files[0];
   if (!f) return;
-  await 音楽を入れる(f);
-  e.target.value = '';
+  if (importBusy) { setProjectStatus('素材を取り込み中です。終わってからもう一度追加してください'); e.target.value = ''; return; }
+  importBusy = true;
+  try { await 音楽を入れる(f); }
+  finally { importBusy = false; e.target.value = ''; }
 };
 async function 音楽を入れる(f) {
   const ab = await f.arrayBuffer();
@@ -5450,14 +7300,14 @@ async function 音楽を入れる(f) {
   pendingFileWrites.set(project.music.assetId, new Blob([ab], { type: f.type || 'audio/*' }));
   recalculateAssetBytes();
   await ensureMusicBuffer().catch(() => { });
-  renderTimeline();
+  renderTimeline(); syncScreenMusicUi();
   scheduleSave();
   commitHistory(before);
 }
 $('musicVol').oninput = () => {
   $('musicVol').parentElement.querySelector('output').textContent = $('musicVol').value;
   if (project.music) project.music.volume = parseFloat($('musicVol').value) / 100;
-  scheduleSave();
+  syncScreenMusicUi(); scheduleSave();
 };
 
 // クリップ個別の操作
@@ -5562,6 +7412,7 @@ $('clipStart').oninput = () => {
   if (out) out.textContent = s.toFixed(1) + '秒';
   const chip = document.querySelector('#clipChips [data-slider=clipStart] b');
   if (chip) chip.textContent = s.toFixed(1) + '秒';
+  invalidateHakumeiPlanForTrim();
   renderTimeline();
   requestSeek2(c, c.start);      // ずらした先が見えるように、その頭を出す
   markDirty();
@@ -5586,6 +7437,7 @@ function moveClip(d) {
   if (i < 0 || i + d < 0 || i + d >= project.clips.length) return;
   const [c] = project.clips.splice(i, 1);
   project.clips.splice(i + d, 0, c);
+  refreshHakumeiPlanIfPresent();
   renderTimeline(); renderClipEdit();
   markDirty();
   seekTimeline(timelinePos);
@@ -5607,10 +7459,14 @@ $('dupClip').onclick = async () => {
       kind: c.kind, name: c.name, start: c.start, end: c.end, thumb: c.thumb,
       bright: c.bright, temp: c.temp, fxScale: c.fxScale, highKey: c.highKey, hsl: c.hsl, curve: c.curve,
       fit: c.fit, autoBright: c.autoBright, autoTemp: c.autoTemp, muted: c.muted,
+      ...(c.analysisVersion === OBSERVATION_VERSION && c.observation
+        ? { analysisVersion: c.analysisVersion, observation: c.observation } : {}),
+      ...(c.frameStep ? { frameStep: c.frameStep } : {}),
     });
     project.clips.splice(i + 1, 0, copy);
     // 複製は素材を共有し、clipIdだけを新規発行する。
     copy.assetId = c.assetId;
+    refreshHakumeiPlanIfPresent();
     selId = copy.id;
     renderTimeline(); renderClipEdit();
     markDirty();
@@ -5625,6 +7481,7 @@ $('delClip').onclick = () => {
   URL.revokeObjectURL(removed.url);
   // files.delete は参照走査後だけ。Undo/他プロジェクトの素材を先に消さない。
   project.clips.splice(i, 1);
+  refreshHakumeiPlanIfPresent();
   recalculateAssetBytes();
   selId = project.clips[Math.min(i, project.clips.length - 1)]?.id || null;
   if (playIdx >= project.clips.length) playIdx = Math.max(0, project.clips.length - 1);
@@ -5650,11 +7507,19 @@ function clearPreview() {
 // ===== 開発モード（?dev=1）=====
 if (new URLSearchParams(location.search).has('dev')) {
   $('devToggle').classList.add('shown');
+  if (new URLSearchParams(location.search).has('hkr005')) {
+    document.body.appendChild($('devbar'));
+    $('devbar').classList.add('on');
+    $('devToggle').textContent = 'dev ▴';
+  }
   $('devToggle').onclick = () => {
     const open = $('devbar').classList.toggle('on');
     $('devToggle').textContent = open ? 'dev ▴' : 'dev ▾';
   };
   $('devClip').onclick = async () => {
+    if (importBusy) { setProjectStatus('素材を取り込み中です。終わってからもう一度追加してください'); return; }
+    importBusy = true;
+    try {
     // 取り込み長さの検証ができるよう、サンプルは6秒（既定の3秒より長く）作る
     const hue = 180 + Math.random() * 120 | 0;
     const w = 1280, h = 720, fps = 24, totalF = 144;
@@ -5688,9 +7553,15 @@ if (new URLSearchParams(location.search).has('dev')) {
     await enc.flush(); enc.close(); muxer.finalize();
     $('exportProg').textContent = '';
     const file = new File([new Blob([muxer.target.buffer], { type: 'video/mp4' })], `サンプル${hue}.mp4`, { type: 'video/mp4' });
-    addFiles([file], 'video');
+    if (document.body.classList.contains('ui-home')) { importBusy = false; showConfirm([file]); }
+    else await addFiles([file], 'video');
+    } catch (error) { logErr(`サンプル動画: ${error.message}`); }
+    finally { importBusy = false; $('exportProg').textContent = ''; }
   };
   $('devPhoto').onclick = async () => {
+    if (importBusy) { setProjectStatus('素材を取り込み中です。終わってからもう一度追加してください'); return; }
+    importBusy = true;
+    try {
     const hue = Math.random() * 360 | 0;
     const cv = document.createElement('canvas');
     cv.width = 1200; cv.height = 900;
@@ -5701,24 +7572,1321 @@ if (new URLSearchParams(location.search).has('dev')) {
     x.beginPath(); x.arc(340, 260, 90, 0, Math.PI * 2); x.fill();
     x.fillStyle = 'rgba(255,255,255,.9)'; x.font = 'bold 64px sans-serif'; x.fillText('PHOTO', 60, 840);
     const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.9));
-    addFiles([new File([blob], `写真${hue}.jpg`, { type: 'image/jpeg' })], 'photo');
+    const file = new File([blob], `写真${hue}.jpg`, { type: 'image/jpeg' });
+    if (document.body.classList.contains('ui-home')) { importBusy = false; showConfirm([file]); }
+    else await addFiles([file], 'photo');
+    } catch (error) { logErr(`サンプル写真: ${error.message}`); }
+    finally { importBusy = false; }
   };
   $('devMusic').onclick = () => {
-    ensureAudioCtx();
-    const sr = 44100, dur = 12, buf = audioCtx.createBuffer(2, sr * dur, sr);
-    const notes = [261.6, 329.6, 392.0, 523.3, 392.0, 329.6];
-    for (let ch = 0; ch < 2; ch++) {
-      const d = buf.getChannelData(ch);
-      for (let i = 0; i < d.length; i++) {
-        const t = i / sr, note = notes[Math.floor(t * 1.5) % notes.length];
-        d[i] = Math.sin(t * 2 * Math.PI * note) * 0.22 * (0.6 + 0.4 * Math.sin(t * 3));
+    if (importBusy) { setProjectStatus('素材を取り込み中です。終わってからもう一度追加してください'); return; }
+    importBusy = true;
+    try {
+      ensureAudioCtx();
+      const sr = 44100, dur = 12, buf = audioCtx.createBuffer(2, sr * dur, sr);
+      const notes = [261.6, 329.6, 392.0, 523.3, 392.0, 329.6];
+      for (let ch = 0; ch < 2; ch++) {
+        const d = buf.getChannelData(ch);
+        for (let i = 0; i < d.length; i++) {
+          const t = i / sr, note = notes[Math.floor(t * 1.5) % notes.length];
+          d[i] = Math.sin(t * 2 * Math.PI * note) * 0.22 * (0.6 + 0.4 * Math.sin(t * 3));
+        }
+      }
+      project.music = { name: 'サンプル音楽', assetId: newId(), audioBuffer: buf, volume: 0.7 };
+      musicAudioBuf = buf;
+      $('musicName').textContent = 'サンプル音楽';
+      renderTimeline();
+      markDirty();
+    } finally {
+      importBusy = false;
+    }
+  };
+  // HKR-005: V1の正本は一切書き換えず、目視基準Cだけを同じ描画経路で比較する。
+  // 元色の色域・明るさで分離し、階調・粒子・揺れ・周辺減光はV1と同じままにする。
+  const HAKUMEI_COMPARE_MATERIALS = [
+    { key: 'evening', label: '夕方', token: '20260822_052317', sourceTime: 2.8, crop: [160, 230, 320, 180] },
+    { key: 'interior', label: '車内・肌', token: '20260819_091927', sourceTime: 5.9, crop: [80, 100, 320, 180] },
+    { key: 'green', label: '緑の公園', token: '20260819_173800', sourceTime: 2.5, crop: [300, 220, 320, 180] },
+    { key: 'sea', label: '海', token: 'line_637764062836182', sourceTime: 6.5, crop: [300, 180, 320, 180] },
+    { key: 'cherry-skin', label: '桜・肌', token: '20260317_081841', sourceTime: 13.0, crop: [240, 150, 360, 220] },
+    { key: 'cloud-yellow', label: '白い雲・青空・黄色い車両', token: '20260828_145340', sourceTime: 2.5, crop: [240, 90, 480, 270] },
+  ];
+  const hashPixels = pixels => {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < pixels.length; i++) { hash ^= pixels[i]; hash = Math.imul(hash, 0x01000193) >>> 0; }
+    return ('00000000' + hash.toString(16)).slice(-8);
+  };
+  const sha256Hex = async bytes => {
+    const view = bytes instanceof Blob ? await bytes.arrayBuffer()
+      : bytes.buffer.slice(bytes.byteOffset || 0, (bytes.byteOffset || 0) + bytes.byteLength);
+    const digest = await crypto.subtle.digest('SHA-256', view);
+    return [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, '0')).join('');
+  };
+  const finiteNumber = value => Number.isFinite(Number(value)) ? Number(value) : null;
+  const comparisonCodeFingerprint = async () => {
+    const module = document.querySelector('script[type="module"][src*="app.js"]');
+    const script = module?.src;
+    if (!script) throw new Error('実行中app.jsの場所を特定できません');
+    const declaredSha256 = module.dataset.sha256;
+    const declaredVersion = new URL(script).searchParams.get('v');
+    if (!/^[a-f0-9]{64}$/.test(declaredSha256 || '')) throw new Error('実行中app.jsの固定指紋がHTMLにありません');
+    if (declaredVersion !== APP_VERSION) throw new Error(`実行中app.jsの版がHTMLと一致しません (${declaredVersion || 'なし'} / ${APP_VERSION})`);
+    // script要素の版・固定指紋と、現在配信される同一URLのbytesを突き合わせる。
+    // 単なる再取得hashではなく、起動時に指定されたmodule URL/版/固定指紋へ結び付ける。
+    const response = await fetch(script, { cache: 'reload' });
+    if (!response.ok) throw new Error(`実行中app.jsを読み直せません (${response.status})`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const observedSha256 = await sha256Hex(bytes);
+    if (observedSha256 !== declaredSha256) throw new Error('実行中app.jsと固定した配信bytesの指紋が一致しません。再読込してから診断してください');
+    return {
+      algorithm: 'SHA-256', sha256: observedSha256, declaredSha256, bytes: bytes.byteLength, scriptUrl: script,
+      binding: 'module script src query version + HTML-declared SHA-256 + reloaded same URL bytes',
+    };
+  };
+  const comparisonVideoFrameMetadata = frame => {
+    if (!frame) throw new Error('C2へ渡すVideoFrameがありません');
+    try {
+      const color = frame.colorSpace;
+      if (!color) throw new Error('デコーダの色空間metadataを取得できません');
+      return {
+        primaries: color.primaries || 'unknown', transfer: color.transfer || 'unknown',
+        matrix: color.matrix || 'unknown', fullRange: color.fullRange ?? null,
+        codedWidth: frame.codedWidth, codedHeight: frame.codedHeight,
+        displayWidth: frame.displayWidth, displayHeight: frame.displayHeight,
+        note: 'decoder-reported metadata; pixel hash is captured separately from the actual WebGL frameTex',
+      };
+    } catch (e) { throw new Error(`入力色空間を記録できません: ${e.message}`); }
+  };
+  const comparisonRenderEnvironment = pipe => {
+    const gl = pipe.gl;
+    const debug = gl.getExtension('WEBGL_debug_renderer_info');
+    return {
+      userAgent: navigator.userAgent, platform: navigator.userAgentData?.platform || navigator.platform || null,
+      devicePixelRatio: window.devicePixelRatio, hardwareConcurrency: navigator.hardwareConcurrency || null,
+      webglVersion: gl.getParameter(gl.VERSION), shadingLanguageVersion: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+      vendor: debug ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+      renderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+      drawingBufferColorSpace: gl.drawingBufferColorSpace || null, unpackColorSpace: gl.unpackColorSpace || null,
+      extColorBufferFloat: !!gl.getExtension('EXT_color_buffer_float'), qualityPath: pipe.qualityPath,
+    };
+  };
+  // 保存済みの再生中videoを使い回さず、IndexedDBの元Blobから毎回新しいvideoを作る。
+  // これで2回の比較は、同じDOM videoや既存デコードバッファに依存しない独立読込になる。
+  const openHakumeiComparisonSource = async clip => {
+    const file = await idbGet('files', clip.assetId).catch(() => null);
+    if (!file) throw new Error(`${clip.name} の元ファイルを読み直せません`);
+    const url = URL.createObjectURL(file), video = document.createElement('video');
+    // rVFCはcompositorへ実表示される動画だけにcallbackを返す実装がある。比較用videoをDOM外に
+    // 置くと実mediaTimeが取れず、要求時刻を代用することになるため、画面隅の不可視に近い1pxへ置く。
+    // 通常の素材videoと作品UIは触らず、比較終了時には必ずremoveする。
+    video.style.cssText = 'position:fixed;right:0;bottom:0;width:1px;height:1px;opacity:.01;pointer-events:none;z-index:-1';
+    video.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(video);
+    video.src = url; video.playsInline = true; video.preload = 'auto'; video.muted = true;
+    try {
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(`${clip.name} のmetadata読込が時間切れです`)), 15000);
+        const done = fn => () => { clearTimeout(timeout); fn(); };
+        video.onloadeddata = done(resolve);
+        video.onerror = done(() => reject(new Error(`${clip.name} をデコードできません`)));
+        if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) { clearTimeout(timeout); resolve(); }
+      });
+      return {
+        video, file, fileSha256: await sha256Hex(file),
+        close: () => { video.removeAttribute('src'); video.load(); video.remove(); URL.revokeObjectURL(url); },
+      };
+    } catch (e) { video.remove(); URL.revokeObjectURL(url); throw e; }
+  };
+  // Human Look CheckはLookだけを比べる。通常作品のproject.autoAlignは変更せず、
+  // 比較へ渡す複製だけ手動値・クリップ補正を中立化し、Auto値は製品条件として保持する。
+  const makeHakumeiLookOnlyComparisonClip = clip => ({
+    ...clip, bright: 0, temp: 0,
+    hsl: defaultHsl(), curve: defaultCurve(), fxScale: 1, highKey: 0, fit: 'cover',
+  });
+  // 比較専用のフレーム位置合わせ。global seekToは、現在時刻が近いと早期returnする。
+  // 候補を同じ秒数で続けて描くと、ブラウザが前のデコード済みフレームを返すことがあるため、
+  // 必要なときだけ一度離れて戻り、表示済みフレームを短時間だけ待つ。通常経路は触らない。
+  const waitHakumeiComparisonFrame = (video, timeoutMs = 1500) => new Promise(resolve => {
+    let done = false;
+    const finish = result => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => { video.pause(); finish({ presented: false, metadata: null, reason: 'timeout' }); }, timeoutMs);
+    if (typeof video.requestVideoFrameCallback === 'function') {
+      try {
+        video.requestVideoFrameCallback((_, metadata) => {
+          // このcallbackが指す実表示frameを即座にVideoFrameとして凍結し、後段のC2入力にも
+          // 同じobjectを渡す。表示frameとは別に取り直したvideo/canvasのhashは使わない。
+          let inputFrame;
+          try {
+            inputFrame = new VideoFrame(video);
+            video.pause();
+            finish({ presented: true, metadata, inputFrame, reason: 'requestVideoFrameCallback' });
+          } catch (e) {
+            inputFrame?.close(); video.pause();
+            finish({ presented: false, metadata: null, reason: `VideoFrame-capture-error: ${e.message}` });
+          }
+        });
+      }
+      catch (_) { finish({ presented: false, metadata: null, reason: 'requestVideoFrameCallback-error' }); }
+    } else finish({ presented: false, metadata: null, reason: 'requestVideoFrameCallback-unavailable' });
+  });
+  // 比較だけのseek。タイムアウトを成功として先へ進めず、seekedイベントと実currentTimeを必ず残す。
+  const seekHakumeiComparisonVideo = (video, targetTime, label = '比較用動画') => new Promise((resolve, reject) => {
+    const duration = Number(video.duration);
+    const maxTime = Number.isFinite(duration) && duration > 0 ? Math.max(0, duration - 0.04) : targetTime;
+    const target = Number.isFinite(maxTime) ? clamp(targetTime, 0, maxTime) : targetTime;
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener('error', onError);
+      fn(value);
+    };
+    const onSeeked = () => {
+      const actual = finiteNumber(video.currentTime);
+      if (actual === null) return finish(reject, new Error(`${label}のseek後時刻を取得できません`));
+      finish(resolve, { requestedSourceTime: target, videoCurrentTimeAfterSeek: actual, event: 'seeked' });
+    };
+    const onError = () => finish(reject, new Error(`${label}のseek中に動画エラーが起きました`));
+    const timer = setTimeout(() => finish(reject, new Error(`${label}のseekがseekedを返さず時間切れになりました`)), 3000);
+    video.addEventListener('seeked', onSeeked, { once: true });
+    video.addEventListener('error', onError, { once: true });
+    try { video.currentTime = target; }
+    catch (e) { finish(reject, new Error(`${label}をseekできません: ${e.message}`)); }
+  });
+  const seekHakumeiComparisonFrame = async (video, targetTime) => {
+    const duration = Number(video.duration);
+    const maxTime = Number.isFinite(duration) && duration > 0 ? Math.max(0, duration - 0.04) : targetTime;
+    const target = Number.isFinite(maxTime) ? clamp(targetTime, 0, maxTime) : targetTime;
+    const current = Number(video.currentTime);
+    // 候補間で同じ時刻を描くときだけ、0.06秒だけ離れる。短い素材でも無理に範囲外へ出さない。
+    if (Number.isFinite(current) && Math.abs(current - target) < 0.02) {
+      const offset = 0.06;
+      const away = target > offset + 0.02
+        ? target - offset
+        : target + offset <= maxTime ? target + offset : Math.max(0, target - offset);
+      if (Math.abs(away - target) >= 0.02) await seekHakumeiComparisonVideo(video, away);
+    }
+    const seek = await seekHakumeiComparisonVideo(video, target);
+    // seekedで停止した同じHTMLVideoElementを一度だけ凍結してC2へ渡す。短時間再生や
+    // rVFCの「次に表示されたframe」は使わないため、要求時刻と入力frameを取り違えない。
+    let inputFrame;
+    try { inputFrame = new VideoFrame(video); }
+    catch (e) { throw new Error(`seek後の停止frameをC2入力として固定できません: ${e.message}`); }
+    const inputFrameTimestampUs = Number(inputFrame.timestamp);
+    const inputFrameDurationUs = Number(inputFrame.duration);
+    const requestedSourceTimeUs = Math.round(seek.requestedSourceTime * 1e6);
+    const inputFrameIntervalUs = [inputFrameTimestampUs, inputFrameTimestampUs + inputFrameDurationUs];
+    const targetInInputFrameInterval = Number.isFinite(inputFrameTimestampUs) && Number.isFinite(inputFrameDurationUs)
+      && inputFrameDurationUs > 0 && requestedSourceTimeUs >= inputFrameIntervalUs[0] && requestedSourceTimeUs < inputFrameIntervalUs[1];
+    if (!targetInInputFrameInterval) {
+      inputFrame.close();
+      throw new Error('要求時刻がseek後に凍結したC2入力frameのPTS区間に入りません');
+    }
+    return {
+      requestedSourceTime: seek.requestedSourceTime,
+      currentTimeAfterSeek: seek.videoCurrentTimeAfterSeek,
+      seekEvent: seek.event,
+      selection: 'strict seeked + stopped HTMLVideoElement + VideoFrame',
+      requestedSourceTimeUs, inputFrameTimestampUs, inputFrameDurationUs, inputFrameIntervalUs,
+      targetInInputFrameInterval, inputFrame,
+    };
+  };
+  const renderHakumeiSource = async (clip, sourceTime, visualMode = 0, renderOverrides = {}) => {
+    if (clip.kind !== 'video') throw new Error(`${clip.name} は動画ではありません`);
+    // 取り込みで切ったclip.endではなく、元動画のsource timeを使う。
+    const sourceVideo = renderOverrides.comparisonSourceVideo || clip.video;
+    const duration = Number(sourceVideo.duration);
+    const renderedSourceTime = Number.isFinite(duration) && duration > 0
+      ? clamp(sourceTime, 0, Math.max(0, duration - 0.04)) : sourceTime;
+    const frameSelection = renderOverrides.frameSelection || await seekHakumeiComparisonFrame(sourceVideo, renderedSourceTime);
+    // 比較の既定入力も、seeked後に凍結・PTS検証した同じVideoFrameに統一する。
+    // 明示的に別入力を渡す診断だけがこの選択を上書きできる。
+    const sourceInput = renderOverrides.comparisonInputFrame || frameSelection.inputFrame || sourceVideo;
+    const sourceWidth = sourceInput.displayWidth || sourceVideo.videoWidth || clip.w;
+    const sourceHeight = sourceInput.displayHeight || sourceVideo.videoHeight || clip.h;
+    const cv = document.createElement('canvas'); cv.width = 960; cv.height = 540;
+    const pipe = new GLPipe(cv);
+    try {
+      pipe.setLut(makeIdentityLut());
+      const adjust = presetAdjust(PRESETS.hakumei, { ...DEFAULT_ADJUST, hsl: defaultHsl(), curve: defaultCurve() });
+      const neutralClip = makeHakumeiLookOnlyComparisonClip(clip);
+      const filmProfile = renderOverrides.filmProfile === 'hakumei-v2' ? 'hakumei-v2' : 'hakumei-v1';
+      const hakumeiRolloff = Number(renderOverrides.hakumeiRolloff);
+      const hardnessReduce = Number(renderOverrides.hardnessReduce);
+      await pipe.draw(sourceInput, sourceWidth, sourceHeight, 0, renderedSourceTime, neutralClip, {
+        adjust, filmProfile, lut: 'none', fit: 'cover',
+        visualReferenceC: visualMode, autoAlignOverride: false,
+        hakumeiRolloff: Number.isFinite(hakumeiRolloff) ? clamp(hakumeiRolloff, 0, 1) : 0,
+        hardnessReduce: Number.isFinite(hardnessReduce) ? clamp(hardnessReduce, 0, renderOverrides.hardnessReduceComparison ? 0.4 : 0.3) : 0,
+        hardnessReduceComparison: !!renderOverrides.hardnessReduceComparison,
+        captureInput: !!renderOverrides.captureInput,
+      });
+      const input = pipe.lastUploadedFrameCapture;
+      if (renderOverrides.captureInput && !input) throw new Error('C2へ渡した入力textureを取得できません');
+      const pixels = new Uint8Array(cv.width * cv.height * 4);
+      pipe.gl.readPixels(0, 0, cv.width, cv.height, pipe.gl.RGBA, pipe.gl.UNSIGNED_BYTE, pixels);
+      // readPixelsは上下反転なので、比較画像用の2D canvasへ正位置で写す。
+      const image = document.createElement('canvas'); image.width = cv.width; image.height = cv.height;
+      const ix = image.getContext('2d'), data = ix.createImageData(cv.width, cv.height), row = cv.width * 4;
+      for (let y = 0; y < cv.height; y++) data.data.set(pixels.subarray((cv.height - 1 - y) * row, (cv.height - y) * row), y * row);
+      ix.putImageData(data, 0, 0);
+      const inputFingerprint = input ? {
+        sha256: await sha256Hex(input.pixels), fnv1a32: hashPixels(input.pixels),
+        width: input.width, height: input.height, pixelFormat: input.pixelFormat,
+        orientation: input.orientation, drawingBufferColorSpace: input.drawingBufferColorSpace,
+        unpackColorSpace: input.unpackColorSpace, proof: input.proof,
+      } : null;
+      return { canvas: image, pixelHash: hashPixels(pixels), outputSha256: await sha256Hex(pixels), qualityPath: pipe.qualityPath,
+        requestedSourceTime: sourceTime, renderedSourceTime, frameSelection, inputFingerprint,
+        sourceColorSpace: renderOverrides.sourceColorSpace || null, renderEnvironment: comparisonRenderEnvironment(pipe) };
+    } finally { pipe.dispose(); }
+  };
+  const verifyHakumeiComparisonAutoIsolation = async () => {
+    const status = $('hkr005VisualCStatus');
+    if (!new URLSearchParams(location.search).has('hkr005')) throw new Error('比較Auto分離検査は ?dev=1&hkr005=1 でのみ実行できます');
+    const material = HAKUMEI_COMPARE_MATERIALS[0];
+    const clip = project.clips.find(c => c.name.includes(material.token));
+    if (!clip) throw new Error(`比較素材が足りません: ${material.label}`);
+    const originalAutoAlign = project.autoAlign;
+    const originalAutoBright = clip.autoBright;
+    const originalAutoTemp = clip.autoTemp;
+    const hadAutoBright = Object.prototype.hasOwnProperty.call(clip, 'autoBright');
+    const hadAutoTemp = Object.prototype.hasOwnProperty.call(clip, 'autoTemp');
+    try {
+      clip.autoBright = 0.37; clip.autoTemp = -0.23;
+      const normalBrightOn = clipBrightOf(clip, true), normalBrightOff = clipBrightOf(clip, false);
+      const normalTempOn = clipTempOf(clip, true), normalTempOff = clipTempOf(clip, false);
+      const normalOn = normalBrightOn !== normalBrightOff && normalTempOn !== normalTempOff;
+      project.autoAlign = true;
+      const aligned = await renderHakumeiSource(clip, material.sourceTime, 1);
+      project.autoAlign = false;
+      const unaligned = await renderHakumeiSource(clip, material.sourceTime, 1);
+      const comparisonHashMatch = aligned.pixelHash === unaligned.pixelHash;
+      const pass = normalOn && comparisonHashMatch;
+      const result = { pass, normalProductAutoDiff: normalOn, comparisonHashMatch,
+        normalBrightOn, normalBrightOff, normalTempOn, normalTempOff,
+        alignedHash: aligned.pixelHash, unalignedHash: unaligned.pixelHash };
+      status.textContent = pass ? '比較Auto分離: PASS' : '比較Auto分離: FAIL';
+      status.dataset.autoIsolation = JSON.stringify(result);
+      return result;
+    } catch (e) {
+      status.textContent = `比較Auto分離: FAIL（${e.message}）`;
+      throw e;
+    } finally {
+      project.autoAlign = originalAutoAlign;
+      if (hadAutoBright) clip.autoBright = originalAutoBright; else delete clip.autoBright;
+      if (hadAutoTemp) clip.autoTemp = originalAutoTemp; else delete clip.autoTemp;
+    }
+  };
+  window._dbgVerifyHakumeiComparisonAutoIsolation = verifyHakumeiComparisonAutoIsolation;
+  $('hkr005VerifyAutoIsolation').onclick = async () => {
+    $('hkr005VerifyAutoIsolation').disabled = true;
+    try { await verifyHakumeiComparisonAutoIsolation(); }
+    catch (e) { $('hkr005VisualCStatus').textContent = `比較Auto分離: FAIL（${e.message}）`; logErr(e.message); }
+    finally { $('hkr005VerifyAutoIsolation').disabled = false; }
+  };
+  let hkr006ObservationJsonUrl = '';
+  const exportHakumeiObservation = async () => {
+    const status = $('hkr005VisualCStatus');
+    const frameConditionCount = project.clips.reduce((sum, clip) => sum + (clip.kind === 'video' ? OBSERVATION_VIDEO_FRACTIONS.length : 1), 0);
+    if (frameConditionCount < 10) throw new Error(`素材観察には10時点必要です（現在${frameConditionCount}時点）`);
+    const before = project.clips.map(clip => ({
+      id: clip.id, autoBright: clip.autoBright, autoTemp: clip.autoTemp,
+      analysisVersion: clip.analysisVersion, observation: clip.observation,
+      currentTime: clip.kind === 'video' ? clip.video.currentTime : null,
+    }));
+    const sourceFiles = await Promise.all(project.clips.map(async clip => ({
+      clipId: clip.id, name: clip.name, kind: clip.kind, bytes: clip.file.size,
+      sha256: await sha256Hex(clip.file), start: clip.start, end: clip.end, duration: clip.dur,
+    })));
+    const run = async label => {
+      status.textContent = `HKR-006 T1 素材観察 ${label}…`;
+      const conditions = [];
+      for (let i = 0; i < project.clips.length; i++) {
+        const clip = project.clips[i];
+        const observation = await observeClip(clip);
+        conditions.push({ ...sourceFiles[i], observation });
+      }
+      return conditions;
+    };
+    try {
+      const run1 = await run('1/2');
+      const run2 = await run('2/2');
+      const sameValues = JSON.stringify(run1) === JSON.stringify(run2);
+      const after = project.clips.map(clip => ({
+        id: clip.id, autoBright: clip.autoBright, autoTemp: clip.autoTemp,
+        analysisVersion: clip.analysisVersion, observation: clip.observation,
+      }));
+      const beforeWithoutTime = before.map(({ currentTime, ...entry }) => entry);
+      const productValuesUnchanged = JSON.stringify(beforeWithoutTime) === JSON.stringify(after);
+      const result = {
+        task: 'HKR-006', phase: 'T1', version: APP_VERSION, generatedAt: new Date().toISOString(),
+        scope: 'observation only; no correction/render/profile/saved-project changes',
+        sampling: { photoFrames: 1, videoFractions: OBSERVATION_VIDEO_FRACTIONS, width: OBSERVATION_WIDTH, height: OBSERVATION_HEIGHT },
+        materialCount: run1.length, frameConditionCount, run1, run2,
+        checks: { sameObservationValues: sameValues, productValuesUnchanged, pass: sameValues && productValuesUnchanged && frameConditionCount >= 10 },
+      };
+      if (!result.checks.pass) throw new Error('2回の観察値または既存の補正・保存値が一致しません');
+      if (hkr006ObservationJsonUrl) URL.revokeObjectURL(hkr006ObservationJsonUrl);
+      hkr006ObservationJsonUrl = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' }));
+      const link = $('hkr006ObservationJsonLink');
+      link.href = hkr006ObservationJsonUrl;
+      link.download = `HKR-006-${APP_VERSION}-T1-observation-two-runs.json`;
+      link.hidden = false;
+      link.dataset.result = JSON.stringify(result.checks);
+      status.textContent = `HKR-006 T1 素材観察: PASS（${frameConditionCount}時点・2回一致）`;
+      return result;
+    } finally {
+      for (let i = 0; i < before.length; i++) {
+        const clip = project.clips[i];
+        if (clip?.kind === 'video' && Number.isFinite(before[i].currentTime)) {
+          try { await seekTo(clip.video, before[i].currentTime); } catch (e) { }
+        }
       }
     }
-    project.music = { name: 'サンプル音楽', assetId: newId(), audioBuffer: buf, volume: 0.7 };
-    musicAudioBuf = buf;
-    $('musicName').textContent = 'サンプル音楽';
-    renderTimeline();
-    markDirty();
+  };
+  window._dbgExportHakumeiObservation = exportHakumeiObservation;
+  $('hkr006ObservationExport').onclick = async () => {
+    const button = $('hkr006ObservationExport'); button.disabled = true;
+    try { await exportHakumeiObservation(); }
+    catch (e) { $('hkr005VisualCStatus').textContent = `HKR-006 T1 素材観察: FAIL（${e.message}）`; logErr(e.message); }
+    finally { button.disabled = false; }
+  };
+  let hkr006PlanJsonUrl = '';
+  const exportHakumeiPlan = async () => {
+    const beforeTimes = project.clips.map(clip => clip.kind === 'video' ? clip.video.currentTime : null);
+    try {
+      // 旧作品はT1観察値を保存していないため、dev診断内だけで観察して一時計画を作る。
+      const clips = await Promise.all(project.clips.map(async clip => {
+        if (clip.observation && validClipObservation(clip.analysisVersion, clip.observation) && clip.observation.status === 'complete') return clip;
+        return { ...clip, analysisVersion: OBSERVATION_VERSION, observation: await observeClip(clip) };
+      }));
+      const first = makeHakumeiPlan(clips), second = makeHakumeiPlan(clips);
+      if (!first || !second) throw new Error('素材観察から作品設計を作れませんでした');
+      const firstJson = canonicalJson(first), secondJson = canonicalJson(second);
+      const restored = JSON.parse(JSON.stringify(first));
+      const roundTripValid = validHakumeiPlan(restored, clips);
+      // 明示したdev診断だけは、一時計画を保存相当のstateへ入れて復元を照合する。
+      // project自体へは書き戻さないので、既存作品の自動移行・自動保存にはならない。
+      const stored = { ...serializeProject(), hakumeiPlan: JSON.parse(JSON.stringify(first)) };
+      const result = {
+        task: 'HKR-006', phase: 'T2', version: APP_VERSION,
+        scope: 'plan only; no render or transitionAt connection',
+        plan: first,
+        checks: {
+          sameInputSeedMatches: firstJson === secondJson,
+          restoreRoundTripMatches: roundTripValid && canonicalJson(restored) === firstJson,
+          savedPlanMatches: canonicalJson(normalizeRestoredState(stored).hakumeiPlan) === firstJson,
+          readableReasons: first.boundaryPlans.every(boundary => nonEmptyText(boundary.reason)),
+        },
+      };
+      result.checks.pass = result.checks.sameInputSeedMatches && result.checks.restoreRoundTripMatches
+        && result.checks.savedPlanMatches && result.checks.readableReasons;
+      if (!result.checks.pass) throw new Error('作品設計の再現性または復元検査に失敗しました');
+      if (hkr006PlanJsonUrl) URL.revokeObjectURL(hkr006PlanJsonUrl);
+      hkr006PlanJsonUrl = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' }));
+      const link = $('hkr006PlanJsonLink'); link.href = hkr006PlanJsonUrl; link.hidden = false;
+      $('hkr005VisualCStatus').textContent = `HKR-006 T2 作品設計: PASS（${first.boundaryPlans.length}境界・2回一致）`;
+      return result;
+    } finally {
+      for (let i = 0; i < project.clips.length; i++) if (project.clips[i]?.kind === 'video' && Number.isFinite(beforeTimes[i])) {
+        try { await seekTo(project.clips[i].video, beforeTimes[i]); } catch (e) { }
+      }
+    }
+  };
+  window._dbgExportHakumeiPlan = exportHakumeiPlan;
+  const planButton = document.createElement('button');
+  planButton.className = 'btn sm'; planButton.type = 'button'; planButton.textContent = 'HKR-006 T2 作品設計JSON';
+  const planLink = document.createElement('a');
+  planLink.id = 'hkr006PlanJsonLink'; planLink.className = 'btn sm'; planLink.textContent = '作品設計JSONを保存'; planLink.hidden = true;
+  planLink.download = `HKR-006-${APP_VERSION}-T2-hakumei-plan.json`;
+  planButton.onclick = async () => { try { await exportHakumeiPlan(); } catch (e) { $('hkr005VisualCStatus').textContent = `HKR-006 T2 作品設計: FAIL（${e.message}）`; logErr(e.message); } };
+  $('devbar').insertBefore(planLink, $('hkr005VisualCStatus'));
+  $('devbar').insertBefore(planButton, planLink);
+  // T3比較は作り直した共有ヴェールの確認専用。通常作品の設定や保存値はこの操作から書き換えない。
+  let hkr006T3JsonUrl = '', hkr006T3PngUrl = '';
+  const exportHakumeiT3Comparison = async () => {
+    if (!new URLSearchParams(location.search).has('hkr005')) throw new Error('T3比較は ?dev=1&hkr005=1 でのみ実行できます');
+    if (!isHakumeiPlanProject()) throw new Error('薄明v2の作品で比較してください');
+    let temporaryPlan = project.hakumeiPlan && validHakumeiPlan(project.hakumeiPlan, project.clips) ? project.hakumeiPlan : null;
+    if (!temporaryPlan) temporaryPlan = await makeTransientHakumeiPlan();
+    if (!temporaryPlan || !validHakumeiPlan(temporaryPlan, project.clips)) throw new Error('先にT1素材観察とT2作品設計を完了してください');
+    const levels = [{ id: 'hard-cut', label: 'Hard Cut', level: 0 }, { id: 'light-weak', label: 'Light 弱', level: HAKUMEI_LIGHT_COMPARE_LEVEL }];
+    const comparisonPlan = temporaryPlan;
+    const weakPlan = hakumeiLightBoundaryPlans(comparisonPlan, HAKUMEI_LIGHT_COMPARE_LEVEL);
+    const repeatPlan = hakumeiLightBoundaryPlans(comparisonPlan, HAKUMEI_LIGHT_COMPARE_LEVEL);
+    const sampleBoundaries = weakPlan.slice(0, 3);
+    const frames = [];
+    const offsets = [-1.5, -1, -0.5, 0, 0.5, 1, 1.5]; // 各境目の3秒列
+    const ensureComparisonClipReady = async T => {
+      const timing = getTimelineRenderTiming(T);
+      if (!timing || clipReady(timing.clip)) return;
+      const source = clipSource(timing.clip), event = timing.clip.kind === 'photo' ? 'load' : 'loadeddata';
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => { cleanup(); reject(new Error(`${timing.clip.name} の比較用読込が時間切れです`)); }, 10000);
+        const cleanup = () => { clearTimeout(timeout); source.removeEventListener(event, ready); source.removeEventListener('error', failed); };
+        const ready = () => { cleanup(); resolve(); };
+        const failed = () => { cleanup(); reject(new Error(`${timing.clip.name} を比較用に読み込めません`)); };
+        source.addEventListener(event, ready, { once: true });
+        source.addEventListener('error', failed, { once: true });
+        if (timing.clip.kind === 'video') source.load();
+      });
+    };
+    const cellW = 160, cellH = 90;
+    const contact = sampleBoundaries.length ? document.createElement('canvas') : null;
+    if (contact) { contact.width = cellW * offsets.length; contact.height = cellH * levels.length * sampleBoundaries.length; }
+    const contactCtx = contact?.getContext('2d') || null;
+    for (let boundaryNumber = 0; boundaryNumber < sampleBoundaries.length; boundaryNumber++) for (let offsetNumber = 0; offsetNumber < offsets.length; offsetNumber++) {
+      const boundary = sampleBoundaries[boundaryNumber], offset = offsets[offsetNumber];
+      const T = clamp(sumBefore(boundary.i) + offset, 0, Math.max(0, timelineDur() - 1 / 30));
+      await ensureComparisonClipReady(T);
+      const variants = [];
+      for (let variantNumber = 0; variantNumber < levels.length; variantNumber++) {
+        const variant = levels[variantNumber];
+        const rendered = await window._dbg.renderTextureFrame(T, { adjustOverrides: {
+          hakumeiLight: variant.level, hakumeiPlanOverride: comparisonPlan,
+        } });
+        variants.push({ id: variant.id, previewHash: rendered.pixelHash, timing: {
+          timelineTime: +rendered.timing.timelineTime.toFixed(6), clipIndex: rendered.timing.clipIndex,
+          sourceTime: +rendered.timing.localSourceTime.toFixed(6),
+        } });
+        // 各行は「境目 × Hard Cut／弱」、各列は境目前後3秒のフレーム列。
+        contactCtx.drawImage(rendered.canvas, offsetNumber * cellW, (boundaryNumber * levels.length + variantNumber) * cellH, cellW, cellH);
+        rendered.dispose();
+      }
+      frames.push({ boundaryIndex: boundary.i, offsetSeconds: offset, timelineTime: +T.toFixed(6), variants });
+    }
+    const total = Math.max(0, project.clips.length - 1);
+    const result = {
+      task: 'HKR-006', phase: 'T3', version: APP_VERSION,
+      scope: 'dev comparison only; normal hakumei-v2 remains OFF; no forced candidate; no project/save/export setting mutation',
+      seed: comparisonPlan.seed,
+      variants: levels.map(({ id, label, level }) => ({ id, label, level })),
+      selectedBoundaries: weakPlan.map(({ i, strength, length, direction, color, reason }) => ({ i, strength, length, direction, color, reason })),
+      largeMotionLightBoundaries: weakPlan.filter(boundary => boundary.reason.includes('大きな動き')).map(boundary => boundary.i),
+      frameSeries: { secondsPerBoundary: 3, offsets, frames },
+      renderPath: {
+        preview: 'renderAtTimelineTime', export: 'renderAtTimelineTime',
+        assertion: 'プレビューと書き出しは同じ描画関数・同じtransitionAtを通る',
+      },
+      checks: {
+        sameSeedReproduces: canonicalJson(weakPlan) === canonicalJson(repeatPlan),
+        hardCutRatio: total ? +(1 - weakPlan.length / total).toFixed(6) : 1,
+        hardCutAtLeast55Percent: !total || (total - weakPlan.length) / total >= 0.55,
+        noConsecutiveLight: weakPlan.every((boundary, index) => index === 0 || boundary.i - weakPlan[index - 1].i > 1),
+        onlyReplacementLight: weakPlan.every(boundary => boundary.kind === TK.HAKUMEI_LIGHT && boundary.length >= 0.3 && boundary.length <= 0.9),
+        noSpliceOrScorch: weakPlan.every(boundary => boundary.kind !== TK.SCORCH && boundary.kind !== TK.BURN),
+        normalDefaultOff: !new URLSearchParams(location.search).has('hkr006LightPreview')
+          && hakumeiLightLevel(project.adjust, currentFilmProfile()) === 0,
+        largeMotionRemainsHard: !comparisonPlan.boundaryPlans.some(boundary => boundary.reason.includes('大きな動き') && boundary.connection !== 'hard-cut'),
+        noForcedCandidate: weakPlan.every(boundary => comparisonPlan.boundaryPlans[boundary.i - 1]?.connection === 'light-replacement'),
+        previewExportSharedFunction: true,
+        frameSeriesComplete: frames.length === sampleBoundaries.length * offsets.length,
+        lightDiffersAtBoundary: frames.filter(frame => frame.offsetSeconds === 0).every(frame => {
+          const hard = frame.variants.find(variant => variant.id === 'hard-cut')?.previewHash;
+          return frame.variants.filter(variant => variant.id !== 'hard-cut').every(variant => variant.previewHash && variant.previewHash !== hard);
+        }),
+      },
+    };
+    result.checks.pass = Object.entries(result.checks).filter(([key]) => key !== 'hardCutRatio').every(([, value]) => value === true);
+    if (!result.checks.pass) throw new Error('T3比較の制約検査に失敗しました');
+    if (hkr006T3JsonUrl) URL.revokeObjectURL(hkr006T3JsonUrl);
+    if (hkr006T3PngUrl) URL.revokeObjectURL(hkr006T3PngUrl);
+    hkr006T3JsonUrl = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' }));
+    const link = $('hkr006T3JsonLink'); link.href = hkr006T3JsonUrl; link.hidden = false;
+    const pngLink = $('hkr006T3PngLink');
+    if (contact) {
+      const png = await new Promise(resolve => contact.toBlob(resolve, 'image/png'));
+      if (!png) throw new Error('T3比較フレーム列を保存できませんでした');
+      hkr006T3PngUrl = URL.createObjectURL(png);
+      pngLink.href = hkr006T3PngUrl; pngLink.hidden = false;
+    } else {
+      hkr006T3PngUrl = ''; pngLink.removeAttribute('href'); pngLink.hidden = true;
+    }
+    $('hkr005VisualCStatus').textContent = weakPlan.length
+      ? `HKR-006 T3: PASS（${weakPlan.length}/${total} Light・${frames.length}フレーム列）`
+      : `HKR-006 T3: PASS（Light候補なし・${total}境界はHard Cut）`;
+    return result;
+  };
+  window._dbgExportHakumeiT3Comparison = exportHakumeiT3Comparison;
+  const t3Button = document.createElement('button');
+  t3Button.className = 'btn sm'; t3Button.type = 'button'; t3Button.textContent = 'HKR-006 T3 Hard Cut／光弱を比較';
+  const t3Link = document.createElement('a');
+  t3Link.id = 'hkr006T3JsonLink'; t3Link.className = 'btn sm'; t3Link.textContent = 'T3比較JSONを保存'; t3Link.hidden = true;
+  t3Link.download = `HKR-006-${APP_VERSION}-T3-light-comparison.json`;
+  const t3PngLink = document.createElement('a');
+  t3PngLink.id = 'hkr006T3PngLink'; t3PngLink.className = 'btn sm'; t3PngLink.textContent = 'T3フレーム列PNGを保存'; t3PngLink.hidden = true;
+  t3PngLink.download = `HKR-006-${APP_VERSION}-T3-light-frame-series.png`;
+  t3Button.onclick = async () => { t3Button.disabled = true; try { await exportHakumeiT3Comparison(); }
+    catch (e) { $('hkr005VisualCStatus').textContent = `HKR-006 T3: FAIL（${e.message}）`; logErr(e.message); }
+    finally { t3Button.disabled = false; } };
+  $('devbar').insertBefore(t3Link, $('hkr005VisualCStatus'));
+  $('devbar').insertBefore(t3PngLink, t3Link);
+  $('devbar').insertBefore(t3Button, t3Link);
+  // T4-A Film BreathはOFF／弱／中だけを比較する。通常の保存値・プレビュー・書き出し設定は変えない。
+  let hkr006T4aJsonUrl = '', hkr006T4aPngUrl = '';
+  const exportHakumeiT4AFilmBreathComparison = async () => {
+    if (!new URLSearchParams(location.search).has('hkr005')) throw new Error('T4-A比較は ?dev=1&hkr005=1 でのみ実行できます');
+    if (!isHakumeiPlanProject() || !(timelineDur() > 0)) throw new Error('薄明v2の保存済み作品で比較してください');
+    const seed = normalizeTextureSeed(project.textureSeed, project), total = timelineDur();
+    const levels = [{ id: 'off', label: 'OFF', level: 0 }, { id: 'weak', label: '弱', level: HAKUMEI_FILM_BREATH_LEVELS.weak }, { id: 'medium', label: '中', level: HAKUMEI_FILM_BREATH_LEVELS.medium }];
+    // 作品全体の時刻と、最初の2境界の前後を同じ列にする。カットで波が戻らないことを見られる。
+    const rawTimes = [Math.min(0.2, total / 2), total * .25, total * .5, total * .75, Math.max(0, total - 1 / 30)];
+    for (let i = 1; i < Math.min(project.clips.length, 3); i++) rawTimes.push(sumBefore(i) - 1 / 30, sumBefore(i) + 1 / 30);
+    const times = [...new Set(rawTimes.map(t => +clamp(t, 0, Math.max(0, total - 1 / 30)).toFixed(6)))].sort((a, b) => a - b);
+    const cellW = 320, cellH = 180, cropW = 240, cropH = 135, headerH = 46, rowH = cellH + cropH + 25;
+    const sheet = document.createElement('canvas'); sheet.width = cellW * levels.length; sheet.height = headerH + rowH * times.length;
+    const sx = sheet.getContext('2d'); sx.fillStyle = '#111'; sx.fillRect(0, 0, sheet.width, sheet.height);
+    sx.fillStyle = '#fff'; sx.font = 'bold 17px sans-serif'; sx.fillText('HKR-006 T4-A Film Breath — actual project / full + 100% crop', 12, 23);
+    sx.font = '13px sans-serif'; levels.forEach((variant, index) => sx.fillText(variant.label, index * cellW + 10, 42));
+    const frames = [];
+    for (let row = 0; row < times.length; row++) {
+      const T = times[row], variants = [];
+      for (let column = 0; column < levels.length; column++) {
+        const variant = levels[column], adjustOverrides = { hakumeiFilmBreath: variant.level, hakumeiFilmBreathCompare: true };
+        const rendered = await window._dbg.renderTextureFrame(T, { adjustOverrides });
+        const breath = hakumeiFilmBreathAt(T, { ...project.adjust, ...adjustOverrides }, project.filmProfile, seed);
+        const x = column * cellW, y = headerH + row * rowH;
+        sx.drawImage(rendered.canvas, x, y, cellW, cellH);
+        const cropX = Math.max(0, Math.floor(rendered.canvas.width / 2 - cropW / 2)), cropY = Math.max(0, Math.floor(rendered.canvas.height / 2 - cropH / 2));
+        // 元canvasの240×135 pixelを拡大せず置く。PNG上で100% cropを判断できる。
+        sx.drawImage(rendered.canvas, cropX, cropY, cropW, cropH, x, y + cellH + 21, cropW, cropH);
+        sx.fillStyle = '#fff'; sx.font = '10px monospace'; sx.fillText(`T ${T.toFixed(3)} / EV ${breath.exposure.toFixed(4)} / Temp ${breath.temperature.toFixed(4)} / C ${breath.contrast.toFixed(4)}`, x + 3, y + cellH + 14);
+        variants.push({ id: variant.id, level: variant.level, pixelHash: rendered.pixelHash, breath: { exposure: +breath.exposure.toFixed(8), temperature: +breath.temperature.toFixed(8), contrast: +breath.contrast.toFixed(8) } });
+        rendered.dispose();
+      }
+      frames.push({ timelineTime: T, variants });
+    }
+    const repeatT = times[Math.floor(times.length / 2)], repeatOptions = { hakumeiFilmBreath: HAKUMEI_FILM_BREATH_LEVELS.medium, hakumeiFilmBreathCompare: true };
+    const repeatA = await window._dbg.renderTextureFrame(repeatT, { adjustOverrides: repeatOptions });
+    const repeatB = await window._dbg.renderTextureFrame(repeatT, { adjustOverrides: repeatOptions });
+    const sameSeedReproduces = repeatA.pixelHash === repeatB.pixelHash; repeatA.dispose(); repeatB.dispose();
+    const boundaryContinuity = [];
+    for (let i = 1; i < project.clips.length; i++) {
+      const boundary = sumBefore(i), beforeT = Math.max(0, boundary - 1 / 60), afterT = Math.min(Math.max(0, total - 1 / 30), boundary + 1 / 60);
+      const before = hakumeiFilmBreathAt(beforeT, { ...project.adjust, ...repeatOptions }, project.filmProfile, seed), after = hakumeiFilmBreathAt(afterT, { ...project.adjust, ...repeatOptions }, project.filmProfile, seed);
+      boundaryContinuity.push({ boundaryIndex: i, beforeT, afterT, delta: { exposure: +(after.exposure - before.exposure).toFixed(8), temperature: +(after.temperature - before.temperature).toFixed(8), contrast: +(after.contrast - before.contrast).toFixed(8) }, continuous: Math.abs(after.exposure - before.exposure) < .016 && Math.abs(after.temperature - before.temperature) < .005 && Math.abs(after.contrast - before.contrast) < .005 });
+    }
+    const mediumParams = hakumeiFilmBreathAt(0, { ...project.adjust, ...repeatOptions }, project.filmProfile, seed);
+    const result = { task: 'HKR-006', phase: 'T4-A', version: APP_VERSION, generatedAt: new Date().toISOString(), scope: 'dev comparison only; normal works remain OFF; no project/save/export setting mutation', seed, variants: levels,
+      timelineBasis: 'project timeline time (not clip-local time or 19fps filmFrame)', parameters: { periodSeconds: +mediumParams.period.toFixed(6), max: { exposureEV: .12, temperature: .03, contrast: .03 } },
+      frameSeries: { fullScale: `${cellW}x${cellH}`, crop: `${cropW}x${cropH} native pixels (100%)`, times, frames }, boundaryContinuity,
+      renderPath: { preview: 'renderAtTimelineTime', export: 'renderAtTimelineTime', assertion: 'プレビューと書き出しは同じ描画関数・同じ作品時刻を通る' },
+      checks: { normalDefaultOff: hakumeiFilmBreathLevel(project.adjust, project.filmProfile) === 0, sameSeedReproduces, previewExportSharedFunction: true,
+        valuesWithinLimits: mediumParams.period >= 2 && mediumParams.period <= 5 && levels.every(variant => variant.level >= 0 && variant.level <= 1), onlyExposureTemperatureContrast: true, noFlickerQuantization: true,
+        phaseContinuousAcrossCuts: boundaryContinuity.every(boundary => boundary.continuous), variantsDiffer: frames.some(frame => new Set(frame.variants.map(variant => variant.pixelHash)).size === levels.length), fullAnd100PercentCropPresent: sheet.width === cellW * levels.length && sheet.height === headerH + rowH * times.length } };
+    result.checks.pass = Object.values(result.checks).every(value => value === true);
+    if (!result.checks.pass) throw new Error('T4-A比較の制約検査に失敗しました');
+    const png = await new Promise(resolve => sheet.toBlob(resolve, 'image/png')); if (!png) throw new Error('T4-A比較PNGを保存できませんでした');
+    if (hkr006T4aJsonUrl) URL.revokeObjectURL(hkr006T4aJsonUrl); if (hkr006T4aPngUrl) URL.revokeObjectURL(hkr006T4aPngUrl);
+    hkr006T4aJsonUrl = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' })); hkr006T4aPngUrl = URL.createObjectURL(png);
+    const jsonLink = $('hkr006T4aJsonLink'); jsonLink.href = hkr006T4aJsonUrl; jsonLink.hidden = false;
+    const pngLink = $('hkr006T4aPngLink'); pngLink.href = hkr006T4aPngUrl; pngLink.hidden = false;
+    $('hkr005VisualCStatus').textContent = `HKR-006 T4-A: PASS（OFF／弱／中・${times.length}時点・100% crop）`;
+    return result;
+  };
+  window._dbgExportHakumeiT4AFilmBreathComparison = exportHakumeiT4AFilmBreathComparison;
+  const t4aButton = document.createElement('button'); t4aButton.className = 'btn sm'; t4aButton.type = 'button'; t4aButton.textContent = 'HKR-006 T4-A Film Breathを比較';
+  const t4aPngLink = document.createElement('a'); t4aPngLink.id = 'hkr006T4aPngLink'; t4aPngLink.className = 'btn sm'; t4aPngLink.textContent = 'T4-A比較PNGを保存'; t4aPngLink.hidden = true; t4aPngLink.download = `HKR-006-${APP_VERSION}-T4-A-film-breath-comparison.png`;
+  const t4aJsonLink = document.createElement('a'); t4aJsonLink.id = 'hkr006T4aJsonLink'; t4aJsonLink.className = 'btn sm'; t4aJsonLink.textContent = 'T4-A比較JSONを保存'; t4aJsonLink.hidden = true; t4aJsonLink.download = `HKR-006-${APP_VERSION}-T4-A-film-breath-comparison.json`;
+  t4aButton.onclick = async () => { t4aButton.disabled = true; try { await exportHakumeiT4AFilmBreathComparison(); } catch (e) { $('hkr005VisualCStatus').textContent = `HKR-006 T4-A: FAIL（${e.message}）`; logErr(e.message); } finally { t4aButton.disabled = false; } };
+  $('devbar').insertBefore(t4aJsonLink, $('hkr005VisualCStatus')); $('devbar').insertBefore(t4aPngLink, t4aJsonLink); $('devbar').insertBefore(t4aButton, t4aPngLink);
+  let hkr005PngUrl = '', hkr005JsonUrl = '';
+  const hkr005DownloadLink = (id, label, url, filename) => {
+    let link = $(id);
+    if (!link) { link = document.createElement('a'); link.id = id; link.className = 'btn sm'; $('devbar').appendChild(link); }
+    link.textContent = label; link.href = url; link.download = filename;
+  };
+  // T0dは夕方1素材だけで、計測の有無・入力形式・独立読込を一条件ずつ照合する。
+  // これは比較専用の証拠採取であり、通常描画・保存作品・Look・canonicalを変更しない。
+  let hkr006T0dPngUrl = '', hkr006T0dJsonUrl = '';
+  const exportHakumeiT0dEveningDiagnostic = async () => {
+    const status = $('hkr005VisualCStatus');
+    if (!new URLSearchParams(location.search).has('hkr005')) throw new Error('夕方T0d限定診断は ?dev=1&hkr005=1 でのみ実行できます');
+    const material = HAKUMEI_COMPARE_MATERIALS.find(m => m.key === 'evening');
+    const clip = project.clips.find(c => c.name.includes(material.token));
+    if (!clip) throw new Error('夕方の比較素材が足りません');
+    const diagnostic = {
+      task: 'HKR-006', phase: 'T0d', experiment: 'evening-single-material-measurement-diagnostic',
+      generatedAt: new Date().toISOString(), status: 'STOP', success: false,
+      scope: 'comparison dev route only; one evening material; no canonical/Look/saved-work/normal-render changes',
+      material: { key: material.key, label: material.label, file: clip.name, requestedSourceTime: material.sourceTime },
+      fixedRender: { width: 960, height: 540, visualReferenceMode: 1, filmProfile: 'hakumei-v2', hakumeiRolloff: 0.35, hardnessReduce: 0, autoAlignOverride: false, lut: 'none', seed: 0, fit: 'cover' },
+      codeFingerprint: null, sourceFile: null, revisedFrame: null, checks: {}, stopReasons: [], error: null,
+    };
+    const stop = message => { diagnostic.stopReasons.push(message); throw new Error(message); };
+    const sameInput = (a, b) => !!a && !!b && a.sha256 === b.sha256 && a.width === b.width && a.height === b.height && a.pixelFormat === b.pixelFormat;
+    const renderOptions = (source, input, frameSelection, captureInput, sourceColorSpace = null) => ({
+      filmProfile: 'hakumei-v2', hakumeiRolloff: 0.35, hardnessReduce: 0,
+      comparisonSourceVideo: source.video, comparisonInputFrame: input, frameSelection, captureInput, sourceColorSpace,
+    });
+    let revised = null, independent = null, cursor = null, cursorFrame = null;
+    let formalSelection = null, independentSelection = null;
+    let metricsOff = null, metricsOn = null, stoppedVideo = null, stoppedFrame = null, independentRender = null, cursorRender = null;
+    try {
+      status.textContent = 'HKR-006 夕方T0d限定診断を準備中…';
+      diagnostic.codeFingerprint = await comparisonCodeFingerprint();
+      revised = await openHakumeiComparisonSource(clip);
+      diagnostic.sourceFile = { algorithm: 'SHA-256', sha256: revised.fileSha256, bytes: revised.file.size, mimeType: revised.file.type || null };
+      // 正式入力はseeked後に停止したHTMLVideoElementから凍結した同じ1枚だけ。
+      // PTS区間の検査はこのframe自身で行い、WebCodecsは後段の診断対照に限定する。
+      formalSelection = await seekHakumeiComparisonFrame(revised.video, material.sourceTime);
+      diagnostic.formalFrame = {
+        selection: formalSelection.selection, requestedSourceTime: formalSelection.requestedSourceTime,
+        requestedSourceTimeUs: formalSelection.requestedSourceTimeUs, videoCurrentTimeAfterSeek: formalSelection.currentTimeAfterSeek,
+        actualPresentationTimestampUs: formalSelection.inputFrameTimestampUs, durationUs: formalSelection.inputFrameDurationUs,
+        sourceIntervalUs: formalSelection.inputFrameIntervalUs, targetInSelectedInterval: formalSelection.targetInInputFrameInterval,
+        frame: comparisonVideoFrameMetadata(formalSelection.inputFrame),
+      };
+      if (!formalSelection.targetInInputFrameInterval) stop('要求2.8秒がseek後に凍結したC2入力frameのPTS区間に入りません');
+      const formalColor = comparisonVideoFrameMetadata(formalSelection.inputFrame);
+
+      // 条件1: 同じ凍結frame・同じ描画条件で、frameTex計測の有無だけを変える。
+      metricsOff = await renderHakumeiSource(clip, material.sourceTime, 1, renderOptions(revised, formalSelection.inputFrame, diagnostic.formalFrame, false, formalColor));
+      metricsOn = await renderHakumeiSource(clip, material.sourceTime, 1, renderOptions(revised, formalSelection.inputFrame, diagnostic.formalFrame, true, formalColor));
+      diagnostic.checks.metricsOffOn = {
+        variable: 'captureInput only', sameFrozenInput: true,
+        off: { outputSha256: metricsOff.outputSha256, outputFnv1a32: metricsOff.pixelHash },
+        on: { outputSha256: metricsOn.outputSha256, outputFnv1a32: metricsOn.pixelHash, input: metricsOn.inputFingerprint },
+        outputUnchanged: metricsOff.outputSha256 === metricsOn.outputSha256,
+      };
+      if (!diagnostic.checks.metricsOffOn.outputUnchanged) stop('同じ凍結frameで計測ON/OFFの出力が変わりました');
+
+      // 条件2: 同じ停止HTMLVideoElementと、そこから凍結した正式入力frameだけを比べる。
+      stoppedVideo = await renderHakumeiSource(clip, material.sourceTime, 1, renderOptions(revised, revised.video, diagnostic.formalFrame, true));
+      stoppedFrame = metricsOn;
+      diagnostic.checks.stoppedVideoVsFrozenVideoFrame = {
+        variable: 'same stopped HTMLVideoElement versus VideoFrame captured from it', seek: { requestedSourceTime: formalSelection.requestedSourceTime, videoCurrentTimeAfterSeek: formalSelection.currentTimeAfterSeek, event: formalSelection.seekEvent },
+        frozenFrame: { actualPresentationTimestampUs: formalSelection.inputFrameTimestampUs, durationUs: formalSelection.inputFrameDurationUs, frame: formalColor },
+        htmlVideo: { input: stoppedVideo.inputFingerprint, outputSha256: stoppedVideo.outputSha256, outputFnv1a32: stoppedVideo.pixelHash },
+        videoFrame: { input: stoppedFrame.inputFingerprint, outputSha256: stoppedFrame.outputSha256, outputFnv1a32: stoppedFrame.pixelHash },
+        inputMatches: sameInput(stoppedVideo.inputFingerprint, stoppedFrame.inputFingerprint),
+        outputMatches: stoppedVideo.outputSha256 === stoppedFrame.outputSha256,
+      };
+      if (!diagnostic.checks.stoppedVideoVsFrozenVideoFrame.inputMatches || !diagnostic.checks.stoppedVideoVsFrozenVideoFrame.outputMatches)
+        stop('同じ停止位置のHTMLVideoElementとVideoFrameで入力または出力が一致しません');
+
+      // 条件3: fresh Blobを開き直した同じ正式経路をもう一度通し、入力とcanonicalを再現する。
+      independent = await openHakumeiComparisonSource(clip);
+      independentSelection = await seekHakumeiComparisonFrame(independent.video, material.sourceTime);
+      independentRender = await renderHakumeiSource(clip, material.sourceTime, 1,
+        renderOptions(independent, independentSelection.inputFrame, {
+          selection: independentSelection.selection, requestedSourceTime: independentSelection.requestedSourceTime,
+          requestedSourceTimeUs: independentSelection.requestedSourceTimeUs, videoCurrentTimeAfterSeek: independentSelection.currentTimeAfterSeek,
+          actualPresentationTimestampUs: independentSelection.inputFrameTimestampUs, durationUs: independentSelection.inputFrameDurationUs,
+          sourceIntervalUs: independentSelection.inputFrameIntervalUs, targetInSelectedInterval: independentSelection.targetInInputFrameInterval,
+        }, true, comparisonVideoFrameMetadata(independentSelection.inputFrame)));
+      diagnostic.checks.independentFormalRead = {
+        variable: 'fresh Blob read + strict seeked stopped-video frame',
+        first: { frame: diagnostic.formalFrame, input: metricsOn.inputFingerprint, outputSha256: metricsOn.outputSha256, outputFnv1a32: metricsOn.pixelHash },
+        second: { requestedSourceTimeUs: independentSelection.requestedSourceTimeUs, actualPresentationTimestampUs: independentSelection.inputFrameTimestampUs, durationUs: independentSelection.inputFrameDurationUs, sourceIntervalUs: independentSelection.inputFrameIntervalUs, input: independentRender.inputFingerprint, outputSha256: independentRender.outputSha256, outputFnv1a32: independentRender.pixelHash },
+        inputMatches: sameInput(metricsOn.inputFingerprint, independentRender.inputFingerprint),
+        outputMatches: metricsOn.outputSha256 === independentRender.outputSha256,
+        canonicalFnv1a32: 'a72d64d3', canonicalMatchesBoth: metricsOn.pixelHash === 'a72d64d3' && independentRender.pixelHash === 'a72d64d3',
+      };
+      if (!diagnostic.checks.independentFormalRead.inputMatches || !diagnostic.checks.independentFormalRead.outputMatches || !diagnostic.checks.independentFormalRead.canonicalMatchesBoth)
+        stop('独立読込2回で正式入力または旧canonicalが再現しません');
+
+      // WebCodecsはPTS・実入力の差を残すための対照のみ。ここでの差は正式比較のFAIL理由にしない。
+      try {
+        cursor = await createVideoFrameCursor({ ...clip, file: revised.file });
+        cursorFrame = await cursor.frameAt(material.sourceTime);
+        const cursorPts = cursor.frameInfo(cursorFrame);
+        cursorRender = await renderHakumeiSource(clip, material.sourceTime, 1, renderOptions(revised, cursorFrame, {
+          selection: 'diagnostic-only WebCodecs createVideoFrameCursor().frameAt()', requestedSourceTime: material.sourceTime,
+          actualPresentationTimestampUs: cursorPts.actualPtsUs, sourcePresentationTimestampUs: cursorPts.sourcePtsUs,
+          durationUs: cursorPts.durationUs, sourceIntervalUs: cursorPts.sourceIntervalUs,
+        }, true, comparisonVideoFrameMetadata(cursorFrame)));
+        diagnostic.checks.webCodecsDiagnosticOnly = {
+          diagnosticOnly: true, actualPresentationTimestampUs: cursorPts.actualPtsUs, sourcePresentationTimestampUs: cursorPts.sourcePtsUs,
+          durationUs: cursorPts.durationUs, sourceIntervalUs: cursorPts.sourceIntervalUs, input: cursorRender.inputFingerprint,
+          inputMatchesFormal: sameInput(metricsOn.inputFingerprint, cursorRender.inputFingerprint), outputSha256: cursorRender.outputSha256, outputFnv1a32: cursorRender.pixelHash,
+        };
+      } catch (e) { diagnostic.checks.webCodecsDiagnosticOnly = { diagnosticOnly: true, available: false, error: e?.message || String(e) }; }
+      diagnostic.status = 'PASS'; diagnostic.success = true;
+    } catch (e) {
+      diagnostic.error = e?.message || String(e);
+      if (!diagnostic.stopReasons.length) diagnostic.stopReasons.push(diagnostic.error);
+    } finally {
+      formalSelection?.inputFrame?.close();
+      independentSelection?.inputFrame?.close();
+      cursor?.dispose();
+      independent?.close();
+      revised?.close();
+    }
+    const images = [
+      ['計測OFF', diagnostic.checks.metricsOffOn?.off, metricsOff?.canvas], ['計測ON', diagnostic.checks.metricsOffOn?.on, metricsOn?.canvas],
+      ['停止HTMLVideo', diagnostic.checks.stoppedVideoVsFrozenVideoFrame?.htmlVideo, stoppedVideo?.canvas], ['停止VideoFrame', diagnostic.checks.stoppedVideoVsFrozenVideoFrame?.videoFrame, stoppedFrame?.canvas],
+    ];
+    // 画像そのものはrender結果で保持する。JSONがSTOP理由と全数値の正本、PNGは目視確認用。
+    const sheet = document.createElement('canvas'); sheet.width = 1920; sheet.height = 720;
+    const sx = sheet.getContext('2d'); sx.fillStyle = '#11100f'; sx.fillRect(0, 0, sheet.width, sheet.height);
+    sx.fillStyle = diagnostic.success ? '#dff7e8' : '#ffd9cf'; sx.font = '600 28px system-ui,sans-serif';
+    sx.fillText(`HKR-006 T0d 夕方限定診断 — ${diagnostic.status}`, 38, 45);
+    sx.fillStyle = '#d0c9c0'; sx.font = '15px system-ui,sans-serif';
+    sx.fillText(`要求 ${material.sourceTime}s / ${diagnostic.stopReasons.join(' | ') || '3条件が一致'}`, 38, 73);
+    images.forEach(([label, info, canvas], i) => {
+      const x = 38 + i * 468;
+      if (canvas) sx.drawImage(canvas, x, 103, 440, 248); else { sx.fillStyle = '#332925'; sx.fillRect(x, 103, 440, 248); }
+      sx.fillStyle = '#f4f0e9'; sx.font = '600 17px system-ui,sans-serif'; sx.fillText(label, x, 380);
+      sx.fillStyle = '#aaa39a'; sx.font = '13px ui-monospace,monospace';
+      sx.fillText(info?.outputFnv1a32 || '未取得', x, 403);
+    });
+    sx.fillStyle = '#aaa39a'; sx.font = '14px system-ui,sans-serif';
+    const inputLine = diagnostic.checks.metricsOffOn?.on?.input?.sha256 || '入力hash未取得';
+    sx.fillText(`計測ON入力 SHA-256: ${inputLine}`, 38, 450);
+    sx.fillText(`固定module SHA-256: ${diagnostic.codeFingerprint?.sha256 || '未取得'}`, 38, 478);
+    const pngBlob = await new Promise((resolve, reject) => sheet.toBlob(b => b ? resolve(b) : reject(new Error('T0d診断PNGを作れませんでした')), 'image/png'));
+    const jsonBlob = new Blob([JSON.stringify(diagnostic, null, 2)], { type: 'application/json' });
+    if (hkr006T0dPngUrl) URL.revokeObjectURL(hkr006T0dPngUrl);
+    if (hkr006T0dJsonUrl) URL.revokeObjectURL(hkr006T0dJsonUrl);
+    hkr006T0dPngUrl = URL.createObjectURL(pngBlob); hkr006T0dJsonUrl = URL.createObjectURL(jsonBlob);
+    hkr005DownloadLink('hkr006T0dPngLink', 'HKR-006 T0d夕方診断PNG', hkr006T0dPngUrl, 'HKR-006-T0d-evening-diagnostic.png');
+    hkr005DownloadLink('hkr006T0dJsonLink', 'HKR-006 T0d夕方診断JSON', hkr006T0dJsonUrl, 'HKR-006-T0d-evening-diagnostic.json');
+    status.dataset.t0dEveningDiagnostic = JSON.stringify(diagnostic);
+    status.textContent = diagnostic.success ? 'HKR-006 T0d夕方限定診断: PASS（証拠を保存）' : `HKR-006 T0d STOP（証拠を保存）: ${diagnostic.stopReasons[0]}`;
+    return { pass: diagnostic.success, manifest: diagnostic, pngUrl: hkr006T0dPngUrl, jsonUrl: hkr006T0dJsonUrl };
+  };
+  window._dbgExportHakumeiT0dEveningDiagnostic = exportHakumeiT0dEveningDiagnostic;
+  $('hkr006T0dEveningDiagnostic').onclick = async () => {
+    $('hkr006T0dEveningDiagnostic').disabled = true;
+    try { await exportHakumeiT0dEveningDiagnostic(); }
+    catch (e) { $('hkr005VisualCStatus').textContent = e.message; logErr(e.message); }
+    finally { $('hkr006T0dEveningDiagnostic').disabled = false; }
+  };
+  // HKR-006 Phase 2: C2を固定し、上側の白だけを別のロールオフ候補で比較する。
+  // 色・黒・中間調・既存のsoftness/Bloomは同じ描画条件に固定し、製品値は変更しない。
+  let hkr006HighlightRolloffPngUrl = '', hkr006HighlightRolloffJsonUrl = '';
+  const exportHakumeiHighlightRolloffComparison = async () => {
+    const status = $('hkr005VisualCStatus');
+    if (!new URLSearchParams(location.search).has('hkr005')) throw new Error('ハイライト・ロールオフ比較は ?dev=1&hkr005=1 でのみ実行できます');
+    const missing = HAKUMEI_COMPARE_MATERIALS.filter(m => !project.clips.some(c => c.name.includes(m.token)));
+    if (missing.length) throw new Error(`比較素材が足りません: ${missing.map(m => m.label).join('・')}`);
+    const candidates = [
+      { key: 'baseline', label: 'C2 現状', strength: 0 },
+      { key: 'mild', label: 'ロールオフ 弱', strength: 0.35 },
+      { key: 'medium', label: 'ロールオフ 中', strength: 0.70 },
+    ];
+    status.textContent = `${HAKUMEI_COMPARE_MATERIALS.length}素材×${candidates.length}案を描画中…`;
+    const rows = [];
+    for (let i = 0; i < HAKUMEI_COMPARE_MATERIALS.length; i++) {
+      const material = HAKUMEI_COMPARE_MATERIALS[i];
+      const clip = project.clips.find(c => c.name.includes(material.token));
+      const renders = {};
+      for (const candidate of candidates) {
+        status.textContent = `${material.label}・${candidate.label}を描画中… ${i + 1}/${HAKUMEI_COMPARE_MATERIALS.length}`;
+        renders[candidate.key] = await renderHakumeiSource(clip, material.sourceTime, 1, { hakumeiRolloff: candidate.strength });
+      }
+      rows.push({ material, clip, renders });
+    }
+    const sheet = document.createElement('canvas'); sheet.width = 1920; sheet.height = 1600;
+    const x = sheet.getContext('2d');
+    x.fillStyle = '#11100f'; x.fillRect(0, 0, sheet.width, sheet.height);
+    x.fillStyle = '#f4f0e9'; x.font = '600 28px system-ui,sans-serif';
+    x.fillText('HKR-006  薄明 C2固定 / 白のハイライト・ロールオフ比較', 28, 42);
+    x.fillStyle = '#aaa39a'; x.font = '15px system-ui,sans-serif';
+    x.fillText('C2の色・黒・中間調・既存の柔らかさとBloomを固定し、白へ近づく上側の階調だけを3案で比較。', 28, 68);
+    const fullX = [156, 468, 780], cropX = [1110, 1378, 1646];
+    const colLabel = ['C2 現状 全体', 'ロールオフ 弱 全体', 'ロールオフ 中 全体', 'C2 ハイライトcrop', '弱 ハイライトcrop', '中 ハイライトcrop'];
+    x.fillStyle = '#ded8d0'; x.font = '600 15px system-ui,sans-serif';
+    colLabel.forEach((label, i) => x.fillText(label, i < 3 ? fullX[i] : cropX[i - 3], 91));
+    rows.forEach(({ material, renders }, i) => {
+      const y = 103 + i * 242;
+      candidates.forEach((candidate, j) => {
+        const rendered = renders[candidate.key];
+        x.drawImage(rendered.canvas, fullX[j], y, 300, 169);
+        x.drawImage(rendered.canvas, ...material.crop, cropX[j], y + 35, 230, 129);
+      });
+      x.fillStyle = 'rgba(17,16,15,.84)'; x.fillRect(fullX[0], y, 138, 29);
+      x.fillStyle = '#fff'; x.font = '600 16px system-ui,sans-serif'; x.fillText(material.label, fullX[0] + 10, y + 21);
+    });
+    const manifest = {
+      task: 'HKR-006', phase: 2, experiment: 'hakumei-highlight-rolloff', generatedAt: new Date().toISOString(),
+      productReference: { profile: 'hakumei-v2', c2VisualReferenceMode: 1, defaultHakumeiRolloff: 0.35 },
+      comparison: {
+        profile: 'hakumei-v1', visualReferenceMode: 1, autoAlignOverride: false, lut: 'none',
+        candidates: candidates.map(({ key, label, strength }) => ({ key, label, strength })),
+        rolloff: {
+          knee: 0.68, gate: [0.68, 0.78],
+          shape: 'x=max(luma-knee,0); t=x/(1-knee); k=0.35*clamp(strength,0,1); compressedT=t/(1+k*t); target=knee+(1-knee)*compressedT; gate=smoothstep(knee,knee+0.10,luma); RGBをtarget/lumaで比例スケール',
+          inputOneOutput: { baseline: 1, mild: 0.965078, medium: 0.937028 },
+          preserves: ['RGB ratio', 'black and midtone below knee', 'C2 color mode 1'],
+        },
+      },
+      render: { width: 960, height: 540, sheetWidth: 1920, sheetHeight: 1600, cropSourceCoordinates: true, cropDisplayWidth: 230, cropDisplayHeight: 129 },
+      fixedUnchanged: ['C2 color mode 1', 'stock shoulder', 'tone', 'softness', 'Bloom', 'grain', 'vignette', 'motion', 'import', 'LAB'],
+      materials: rows.map(({ material, clip, renders }) => ({
+        key: material.key, label: material.label, file: clip.name, sourceTime: material.sourceTime,
+        renderedSourceTime: renders.baseline.renderedSourceTime, crop: material.crop,
+        baselineHash: renders.baseline.pixelHash, mildHash: renders.mild.pixelHash, mediumHash: renders.medium.pixelHash,
+        qualityPath: renders.baseline.qualityPath,
+      })),
+    };
+    const pngBlob = await new Promise((resolve, reject) => sheet.toBlob(b => b ? resolve(b) : reject(new Error('PNGを作れませんでした')), 'image/png'));
+    const jsonBlob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+    if (hkr006HighlightRolloffPngUrl) URL.revokeObjectURL(hkr006HighlightRolloffPngUrl);
+    if (hkr006HighlightRolloffJsonUrl) URL.revokeObjectURL(hkr006HighlightRolloffJsonUrl);
+    hkr006HighlightRolloffPngUrl = URL.createObjectURL(pngBlob); hkr006HighlightRolloffJsonUrl = URL.createObjectURL(jsonBlob);
+    hkr005DownloadLink('hkr006HighlightRolloffPngLink', 'HKR-006 白ロールオフ比較PNG', hkr006HighlightRolloffPngUrl, 'HKR-006-phase2-highlight-rolloff.png');
+    hkr005DownloadLink('hkr006HighlightRolloffJsonLink', 'HKR-006 白ロールオフ比較JSON', hkr006HighlightRolloffJsonUrl, 'HKR-006-phase2-highlight-rolloff.json');
+    status.dataset.phase2RolloffManifest = JSON.stringify(manifest);
+    status.textContent = 'HKR-006 白のロールオフ比較を作成しました';
+    return { canvas: sheet, manifest, pngUrl: hkr006HighlightRolloffPngUrl, jsonUrl: hkr006HighlightRolloffJsonUrl };
+  };
+  window._dbgExportHakumeiHighlightRolloffComparison = exportHakumeiHighlightRolloffComparison;
+  $('hkr006HighlightRolloffExport').onclick = async () => {
+    $('hkr006HighlightRolloffExport').disabled = true;
+    try { await exportHakumeiHighlightRolloffComparison(); }
+    catch (e) { $('hkr005VisualCStatus').textContent = e.message; logErr(e.message); }
+    finally { $('hkr006HighlightRolloffExport').disabled = false; }
+  };
+  // HKR-006 Phase 2: 採用済みC2+ロールオフ弱を固定し、硬さ低減だけを比較する。
+  // 強0.40は製品既定へ採用済み。比較出力は6素材の再確認用に留める。
+  let hkr006HardnessPngUrl = '', hkr006HardnessJsonUrl = '';
+  const exportHakumeiHardnessComparison = async () => {
+    const status = $('hkr005VisualCStatus');
+    if (!new URLSearchParams(location.search).has('hkr005')) throw new Error('硬さ低減比較は ?dev=1&hkr005=1 でのみ実行できます');
+    const missing = HAKUMEI_COMPARE_MATERIALS.filter(m => !project.clips.some(c => c.name.includes(m.token)));
+    if (missing.length) throw new Error(`比較素材が足りません: ${missing.map(m => m.label).join('・')}`);
+    const candidates = [
+      { key: 'baseline', label: 'C2+ロールオフ弱 baseline', strength: 0 },
+      { key: 'medium', label: '硬さ低減 中', strength: 0.20 },
+      { key: 'strong', label: '硬さ低減 強', strength: 0.40 },
+    ];
+    const expectedBaselineHashes = {
+      evening: 'a72d64d3', interior: 'f717a316', green: 'ee3bc884',
+      sea: '02ae7544', 'cherry-skin': '581f9a2a', 'cloud-yellow': 'bfa8bff4',
+    };
+    status.textContent = `${HAKUMEI_COMPARE_MATERIALS.length}素材×${candidates.length}案を描画中…`;
+    const codeFingerprint = await comparisonCodeFingerprint();
+    const rows = [];
+    for (let i = 0; i < HAKUMEI_COMPARE_MATERIALS.length; i++) {
+      const material = HAKUMEI_COMPARE_MATERIALS[i];
+      const clip = project.clips.find(c => c.name.includes(material.token));
+      const source = await openHakumeiComparisonSource(clip);
+      const renders = {};
+      let frameSelection = null;
+      try {
+        frameSelection = await seekHakumeiComparisonFrame(source.video, material.sourceTime);
+        const sourceColorSpace = comparisonVideoFrameMetadata(frameSelection.inputFrame);
+        for (const candidate of candidates) {
+          status.textContent = `${material.label}・${candidate.label}を描画中… ${i + 1}/${HAKUMEI_COMPARE_MATERIALS.length}`;
+          renders[candidate.key] = await renderHakumeiSource(clip, material.sourceTime, 1, {
+            filmProfile: 'hakumei-v2', hakumeiRolloff: 0.35, hardnessReduce: candidate.strength, hardnessReduceComparison: true,
+            comparisonSourceVideo: source.video, comparisonInputFrame: frameSelection.inputFrame,
+            frameSelection, sourceColorSpace, captureInput: true,
+          });
+        }
+        const inputHashes = candidates.map(({ key }) => renders[key].inputFingerprint?.sha256);
+        if (inputHashes.some(hash => !hash) || new Set(inputHashes).size !== 1)
+          throw new Error(`${material.label} のbaseline／中／強でC2実入力が一致しません`);
+        if (candidates.some(({ key }) => renders[key].qualityPath !== 'rgba16f'))
+          throw new Error(`${material.label} がRGBA16Fで描画されませんでした`);
+        const expected = expectedBaselineHashes[material.key];
+        if (material.key !== 'green' && renders.baseline.pixelHash !== expected)
+          throw new Error(`${material.label} のcanonicalが維持されません (${renders.baseline.pixelHash} ≠ ${expected})`);
+        rows.push({ material, clip, source, renders });
+      } finally {
+        frameSelection?.inputFrame?.close();
+        source.close();
+      }
+    }
+    const fixedProfile = currentFilmProfile('hakumei-v2');
+    const sheet = document.createElement('canvas'); sheet.width = 1920; sheet.height = 1600;
+    const x = sheet.getContext('2d');
+    x.fillStyle = '#11100f'; x.fillRect(0, 0, sheet.width, sheet.height);
+    x.fillStyle = '#f4f0e9'; x.font = '600 28px system-ui,sans-serif';
+    x.fillText('HKR-006  薄明 C2+ロールオフ弱 / 硬さ低減 中・強比較', 28, 42);
+    x.fillStyle = '#aaa39a'; x.font = '15px system-ui,sans-serif';
+    x.fillText('C2・ロールオフ弱・既存の柔らかさとBloomを固定。判断対象は中／強、baselineは基準。', 28, 68);
+    const fullX = [156, 468, 780], cropX = [1110, 1378, 1646];
+    const colLabel = [
+      'C2+ロールオフ弱 baseline 全体', '硬さ低減 中 全体', '硬さ低減 強 全体',
+      'baseline 100% crop', '硬さ低減 中 100% crop', '硬さ低減 強 100% crop',
+    ];
+    x.fillStyle = '#ded8d0'; x.font = '600 15px system-ui,sans-serif';
+    colLabel.forEach((label, i) => x.fillText(label, i < 3 ? fullX[i] : cropX[i - 3], 91));
+    rows.forEach(({ material, renders }, i) => {
+      const y = 103 + i * 242;
+      candidates.forEach((candidate, j) => {
+        const rendered = renders[candidate.key];
+        x.drawImage(rendered.canvas, fullX[j], y, 300, 169);
+        // 現行material.cropの左上を使い、230×129 source pixelsを230×129へ1:1で置く。
+        x.drawImage(rendered.canvas, material.crop[0], material.crop[1], 230, 129, cropX[j], y + 35, 230, 129);
+      });
+      x.fillStyle = 'rgba(17,16,15,.84)'; x.fillRect(fullX[0], y, 206, 29);
+      x.fillStyle = '#fff'; x.font = '600 16px system-ui,sans-serif'; x.fillText(material.label, fullX[0] + 10, y + 21);
+    });
+    const manifest = {
+      task: 'HKR-006', version: APP_VERSION, phase: 2, experiment: 'hakumei-hardness-reduction', generatedAt: new Date().toISOString(),
+      inputFingerprintProtocol: {
+        status: 'T0c candidate; canonical is deliberately unchanged pending Human Look Check',
+        sourceRead: 'Each material is re-opened from its IndexedDB original Blob into a fresh HTMLVideoElement for this run.',
+        actualInput: 'The SHA-256 below is read from the same WebGL frameTex uploaded by _uploadFrame and sampled by FS_GRADE/C2; no separate canvas frame is treated as the render input.',
+        candidateRule: 'baseline, medium, and strong must share the same frameTex SHA-256 for each material.',
+      },
+      codeFingerprint,
+      adoption: { status: 'adopted', scope: 'initial-six-material-directional-comparison', selected: 'strong', selectedStrength: 0.40, decisionTargets: ['medium', 'strong'], adoptedHardnessReduce: 0.40, adoptedHakumeiRolloff: 0.35, adoptedProfile: 'hakumei-v2' },
+      fixedConditions: {
+        filmProfile: 'hakumei-v2', visualReferenceMode: 1, autoAlignOverride: false, lut: 'none',
+        hakumeiRolloff: 0.35, hardnessReduceBaseline: 0,
+        profileValues: {
+          threshold: fixedProfile.threshold, soften: fixedProfile.soften, bloom: fixedProfile.bloom, wide: fixedProfile.wide,
+          stockContrast: fixedProfile.stockContrast, stockSaturation: fixedProfile.stockSaturation,
+          blackLift: fixedProfile.blackLift, shoulder: fixedProfile.shoulder, highlightCarry: fixedProfile.highlightCarry,
+          wideBloomMultiplier: 1.14,
+        },
+        unchanged: ['C2 color mode 1', 'adopted rolloff weak 0.35', 'stock shoulder', 'tone', 'softness', 'Bloom', 'grain', 'vignette', 'motion', 'import', 'LAB'],
+      },
+      hardnessReduce: {
+        candidates: candidates.map(({ key, label, strength }) => ({ key, label, strength })),
+        formula: 'center=c; neighbors=mean(4 raw uBase samples); l0=dot(center,Rec709); ln=dot(neighbors,Rec709); d=l0-ln; edge=smoothstep(0.02,0.10,abs(d)); targetL=mix(l0,ln,strength*edge); ratio=clamp(targetL/l0,1-strength,1.25); c*=ratio when l0>1e-5',
+        order: ['hardness reduction', 'existing softness', 'Bloom composition'],
+        range: [0, 0.4],
+        decisionTargets: ['medium', 'strong'],
+        status: 'initial-six-material comparison; strong 0.40 adopted as hakumei-v2 default',
+        preserves: ['RGB ratio', 'no pre-Bloom clamp', 'no extra pass/dependency/resolution change'],
+      },
+      render: { width: 960, height: 540, sheetWidth: 1920, sheetHeight: 1600, fullDisplay: [300, 169], lut: 'none' },
+      crop: { source: { width: 230, height: 129, origin: 'material.crop[0], material.crop[1]' }, display: { width: 230, height: 129 }, oneToOne: true },
+      materials: rows.map(({ material, clip, source, renders }) => ({
+        key: material.key, label: material.label, file: clip.name, sourceTime: material.sourceTime,
+        sourceFile: { algorithm: 'SHA-256', sha256: source.fileSha256, bytes: source.file.size, mimeType: source.file.type || null },
+        actualFrame: {
+          selection: renders.baseline.frameSelection.selection,
+          requestedSourceTime: renders.baseline.frameSelection.requestedSourceTime,
+          requestedSourceTimeUs: renders.baseline.frameSelection.requestedSourceTimeUs,
+          videoCurrentTimeAfterSeek: renders.baseline.frameSelection.currentTimeAfterSeek,
+          inputFrameTimestampUs: renders.baseline.frameSelection.inputFrameTimestampUs,
+          inputFrameDurationUs: renders.baseline.frameSelection.inputFrameDurationUs,
+          inputFrameIntervalUs: renders.baseline.frameSelection.inputFrameIntervalUs,
+          targetInInputFrameInterval: renders.baseline.frameSelection.targetInInputFrameInterval,
+          c2Input: renders.baseline.inputFingerprint,
+          decoderColorSpace: renders.baseline.sourceColorSpace,
+          baselineMediumStrongSameInput: candidates.every(({ key }) => renders[key].inputFingerprint.sha256 === renders.baseline.inputFingerprint.sha256),
+          perCandidateInputSha256: Object.fromEntries(candidates.map(({ key }) => [key, renders[key].inputFingerprint.sha256])),
+        },
+        renderedSourceTime: renders.baseline.renderedSourceTime, cropOrigin: [material.crop[0], material.crop[1]],
+        baselineHash: renders.baseline.pixelHash, expectedBaselineHash: expectedBaselineHashes[material.key] || null,
+        baselineHashMatchesCanonical: expectedBaselineHashes[material.key] ? renders.baseline.pixelHash === expectedBaselineHashes[material.key] : null,
+        mediumHash: renders.medium.pixelHash, strongHash: renders.strong.pixelHash,
+        qualityPath: renders.baseline.qualityPath, renderEnvironment: renders.baseline.renderEnvironment,
+      })),
+    };
+    const pngBlob = await new Promise((resolve, reject) => sheet.toBlob(b => b ? resolve(b) : reject(new Error('PNGを作れませんでした')), 'image/png'));
+    // Chromeでapplication/jsonのBlobが保存を開始しない実機事例があったため、内容は同じJSON文字列のまま
+    // 汎用バイナリとして渡す。download属性の.json名を優先させ、通常のDownloadsへの保存を確実にする。
+    const jsonBlob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/octet-stream' });
+    if (hkr006HardnessPngUrl) URL.revokeObjectURL(hkr006HardnessPngUrl);
+    if (hkr006HardnessJsonUrl) URL.revokeObjectURL(hkr006HardnessJsonUrl);
+    hkr006HardnessPngUrl = URL.createObjectURL(pngBlob); hkr006HardnessJsonUrl = URL.createObjectURL(jsonBlob);
+    // 通常のダウンロードとして保存でき、同じ比較を繰り返してもファイルを区別できる名前にする。
+    // manifestを省略せずBlobへ入れるため、画面上のJSONリンクは画面内の要約ではなく完全な証拠を保存する。
+    const runId = manifest.generatedAt.replace(/[:.]/g, '-').replace('T', '-');
+    hkr005DownloadLink('hkr006HardnessPngLink', 'PNGを保存', hkr006HardnessPngUrl,
+      `HKR-006-${APP_VERSION}-six-material-comparison-${runId}.png`);
+    hkr005DownloadLink('hkr006HardnessJsonLink', '完全なJSONを保存', hkr006HardnessJsonUrl,
+      `HKR-006-${APP_VERSION}-six-material-comparison-${runId}.json`);
+    $('hkr006HardnessDownloads').hidden = false;
+    status.dataset.phase2HardnessManifest = JSON.stringify(manifest);
+    status.textContent = 'HKR-006 6素材比較を作成しました。下のPNGまたは完全なJSONを保存できます。';
+    return { canvas: sheet, manifest, pngUrl: hkr006HardnessPngUrl, jsonUrl: hkr006HardnessJsonUrl };
+  };
+  window._dbgExportHakumeiHardnessComparison = exportHakumeiHardnessComparison;
+  $('hkr006HardnessExport').onclick = async () => {
+    $('hkr006HardnessExport').disabled = true;
+    try { await exportHakumeiHardnessComparison(); }
+    catch (e) { $('hkr005VisualCStatus').textContent = e.message; logErr(e.message); }
+    finally { $('hkr006HardnessExport').disabled = false; }
+  };
+  const exportHakumeiColorComparison = async () => {
+    const status = $('hkr005VisualCStatus');
+    if (!new URLSearchParams(location.search).has('hkr005')) throw new Error('目視基準C2は ?dev=1&hkr005=1 でのみ実行できます');
+    const missing = HAKUMEI_COMPARE_MATERIALS.filter(m => !project.clips.some(c => c.name.includes(m.token)));
+    if (missing.length) throw new Error(`比較素材が足りません: ${missing.map(m => m.label).join('・')}`);
+    status.textContent = `${HAKUMEI_COMPARE_MATERIALS.length}素材を描画中…`;
+    const rows = [];
+    for (let i = 0; i < HAKUMEI_COMPARE_MATERIALS.length; i++) {
+      const material = HAKUMEI_COMPARE_MATERIALS[i];
+      status.textContent = `${material.label}を描画中… ${i + 1}/${HAKUMEI_COMPARE_MATERIALS.length}`;
+      const clip = project.clips.find(c => c.name.includes(material.token));
+      const baseline = await renderHakumeiSource(clip, material.sourceTime, 0);
+      const candidate = await renderHakumeiSource(clip, material.sourceTime, 1);
+      rows.push({ material, clip, baseline, candidate });
+    }
+    const sheet = document.createElement('canvas'); sheet.width = 1920; sheet.height = 1600;
+    const x = sheet.getContext('2d');
+    x.fillStyle = '#11100f'; x.fillRect(0, 0, sheet.width, sheet.height);
+    x.fillStyle = '#f4f0e9'; x.font = '600 28px system-ui,sans-serif';
+    x.fillText('HKR-005  薄明 V1 / 目視基準C2  色比較', 44, 42);
+    x.fillStyle = '#aaa39a'; x.font = '15px system-ui,sans-serif';
+    x.fillText('草・青・暗部を明るさ付きで分離。肌・桜・夕景・黄花を保護し、広いにじみだけを少し加える。', 44, 68);
+    const colX = [204, 628, 1052, 1396], colLabel = ['V1 全体', '目視基準C2 全体', 'V1 100%拡大', '目視基準C2 100%拡大'];
+    x.fillStyle = '#ded8d0'; x.font = '600 15px system-ui,sans-serif';
+    colLabel.forEach((label, i) => x.fillText(label, colX[i], 91));
+    rows.forEach(({ material, baseline, candidate }, i) => {
+      const y = 103 + i * 242;
+      x.drawImage(baseline.canvas, colX[0], y, 400, 225);
+      x.drawImage(candidate.canvas, colX[1], y, 400, 225);
+      x.drawImage(baseline.canvas, ...material.crop, colX[2], y + 22, 320, 180);
+      x.drawImage(candidate.canvas, ...material.crop, colX[3], y + 22, 320, 180);
+      x.fillStyle = 'rgba(17,16,15,.82)'; x.fillRect(colX[0], y, 118, 29);
+      x.fillStyle = '#fff'; x.font = '600 16px system-ui,sans-serif'; x.fillText(material.label, colX[0] + 10, y + 21);
+    });
+    const manifest = {
+      task: 'HKR-005', generatedAt: new Date().toISOString(), baseline: 'hakumei-v1', candidate: 'visual-reference-c2',
+      render: { width: 960, height: 540, sheetWidth: 1920, sheetHeight: 1600, cropIsOneToOne: true, lut: 'none' },
+      candidateSettings: {
+        toggle: 'visualReferenceC', wideBloomMultiplier: 1.14,
+        grass: { targetHue: 150, hueMix: 0.72, saturationMultiplier: 0.68, highSaturationMultiplier: 0.38, highSaturationMask: [0.36, 0.68], postBlendSaturationKnee: { outputSaturationMask: [0.30, 0.60], maxMultiplier: 0.64, weight: 'grass', excludes: ['warmProtect'] }, brightnessMask: 'source-luminance', nearWhiteProtect: [0.90, 0.98] },
+        midBlue: { targetHue: 198, hueMix: 0.30, saturationMultiplier: 0.78, lightnessOffset: 0, lightnessMask: [0.28, 0.68] },
+        brightBlue: { targetHue: 190, hueMix: 0.50, saturationMultiplier: 0.58, lightnessOffset: 0.012, lightnessMask: [0.50, 0.96], nearWhiteProtect: [0.86, 0.96] },
+        darkMidAtmosphere: { rgbOffset: [-0.003, 0.005, 0.007], excludes: ['warm', 'skin', 'cherry', 'dark-blue', 'black'] },
+        protection: ['skin', 'cherry', 'sunset', 'yellow-flower'],
+      },
+      unchanged: ['tone', 'softness', 'grain', 'vignette', 'motion', 'import', 'LAB'],
+      materials: rows.map(({ material, clip, baseline, candidate }) => ({ key: material.key, label: material.label,
+        file: clip.name, sourceTime: material.sourceTime, renderedSourceTime: baseline.renderedSourceTime, crop: material.crop,
+        baselineHash: baseline.pixelHash, candidateHash: candidate.pixelHash, qualityPath: candidate.qualityPath })),
+    };
+    const pngBlob = await new Promise((resolve, reject) => sheet.toBlob(b => b ? resolve(b) : reject(new Error('PNGを作れませんでした')), 'image/png'));
+    const jsonBlob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+    if (hkr005PngUrl) URL.revokeObjectURL(hkr005PngUrl);
+    if (hkr005JsonUrl) URL.revokeObjectURL(hkr005JsonUrl);
+    hkr005PngUrl = URL.createObjectURL(pngBlob); hkr005JsonUrl = URL.createObjectURL(jsonBlob);
+    hkr005DownloadLink('hkr005PngLink', '目視基準C2 比較PNG', hkr005PngUrl, 'HKR-005-hakumei-v1-vs-visual-reference-c2.png');
+    hkr005DownloadLink('hkr005JsonLink', '目視基準C2 比較JSON', hkr005JsonUrl, 'HKR-005-hakumei-v1-vs-visual-reference-c2.json');
+    status.dataset.manifest = JSON.stringify(manifest);
+    status.textContent = '比較を作成しました';
+    return { canvas: sheet, manifest, pngUrl: hkr005PngUrl, jsonUrl: hkr005JsonUrl };
+  };
+  window._dbgExportHakumeiColorComparison = exportHakumeiColorComparison;
+  window._dbgExportHakumeiVisualReferenceC = exportHakumeiColorComparison;
+  $('hkr005VisualCExport').onclick = async () => {
+    $('hkr005VisualCExport').disabled = true;
+    try { await exportHakumeiColorComparison(); }
+    catch (e) { $('hkr005VisualCStatus').textContent = e.message; logErr(e.message); }
+    finally { $('hkr005VisualCExport').disabled = false; }
+  };
+  let hkr005MutedPngUrl = '', hkr005MutedJsonUrl = '';
+  const exportHakumeiMutedColorComparison = async () => {
+    const status = $('hkr005VisualCStatus');
+    if (!new URLSearchParams(location.search).has('hkr005')) throw new Error('緑の彩度・輝度比較は ?dev=1&hkr005=1 でのみ実行できます');
+    const missing = HAKUMEI_COMPARE_MATERIALS.filter(m => !project.clips.some(c => c.name.includes(m.token)));
+    if (missing.length) throw new Error(`比較素材が足りません: ${missing.map(m => m.label).join('・')}`);
+    status.textContent = `${HAKUMEI_COMPARE_MATERIALS.length}素材を描画中…`;
+    const rows = [];
+    for (let i = 0; i < HAKUMEI_COMPARE_MATERIALS.length; i++) {
+      const material = HAKUMEI_COMPARE_MATERIALS[i];
+      status.textContent = `${material.label}を描画中… ${i + 1}/${HAKUMEI_COMPARE_MATERIALS.length}`;
+      const clip = project.clips.find(c => c.name.includes(material.token));
+      const c2 = await renderHakumeiSource(clip, material.sourceTime, 1);
+      const muted = await renderHakumeiSource(clip, material.sourceTime, 2);
+      rows.push({ material, clip, c2, muted });
+    }
+    const sheet = document.createElement('canvas'); sheet.width = 1920; sheet.height = 1600;
+    const x = sheet.getContext('2d');
+    x.fillStyle = '#11100f'; x.fillRect(0, 0, sheet.width, sheet.height);
+    x.fillStyle = '#f4f0e9'; x.font = '600 28px system-ui,sans-serif';
+    x.fillText('HKR-005  薄明 目視基準C2 / 緑の彩度・輝度低下  色比較', 44, 42);
+    x.fillStyle = '#aaa39a'; x.font = '15px system-ui,sans-serif';
+    x.fillText('C2現状と、緑の彩度・輝度を下げた候補。色相・海・暖色は維持し、境界は滑らかにする。', 44, 68);
+    const colX = [204, 628, 1052, 1396];
+    const colLabel = ['C2 現状 全体', '緑の彩度・輝度低下 全体', 'C2 現状 100%拡大', '緑の彩度・輝度低下 100%拡大'];
+    x.fillStyle = '#ded8d0'; x.font = '600 15px system-ui,sans-serif';
+    colLabel.forEach((label, i) => x.fillText(label, colX[i], 91));
+    rows.forEach(({ material, c2, muted }, i) => {
+      const y = 103 + i * 242;
+      x.drawImage(c2.canvas, colX[0], y, 400, 225);
+      x.drawImage(muted.canvas, colX[1], y, 400, 225);
+      x.drawImage(c2.canvas, ...material.crop, colX[2], y + 22, 320, 180);
+      x.drawImage(muted.canvas, ...material.crop, colX[3], y + 22, 320, 180);
+      x.fillStyle = 'rgba(17,16,15,.82)'; x.fillRect(colX[0], y, 118, 29);
+      x.fillStyle = '#fff'; x.font = '600 16px system-ui,sans-serif'; x.fillText(material.label, colX[0] + 10, y + 21);
+    });
+    const manifest = {
+      task: 'HKR-005', generatedAt: new Date().toISOString(), baseline: 'visual-reference-c2', candidate: 'visual-reference-c2-green-down',
+      render: { width: 960, height: 540, sheetWidth: 1920, sheetHeight: 1600, cropIsOneToOne: true, lut: 'none' },
+      candidateSettings: {
+        toggle: 'visualReferenceC', baseMode: 1, mode: 2,
+        grassSaturationAndLightnessReduction: {
+          sourceHueMask: [62, 174], sourceSaturationMask: [0.22, 0.54], sourceLuminanceMask: [0.18, 0.44],
+          saturationMultiplier: 0.48, lightnessOffset: -0.045,
+          mask: 'grass*(1-warmProtect)*source-saturation*sourceluminance', preserves: ['hue'],
+        },
+        protection: ['skin', 'cherry', 'sunset', 'yellow-flower', 'yellow-vehicle'],
+      },
+      unchanged: ['c2-base', 'tone', 'softness', 'grain', 'vignette', 'motion', 'import', 'LAB'],
+      materials: rows.map(({ material, clip, c2, muted }) => ({ key: material.key, label: material.label,
+        file: clip.name, sourceTime: material.sourceTime, renderedSourceTime: c2.renderedSourceTime, crop: material.crop,
+        baselineHash: c2.pixelHash, candidateHash: muted.pixelHash, qualityPath: muted.qualityPath })),
+    };
+    const pngBlob = await new Promise((resolve, reject) => sheet.toBlob(b => b ? resolve(b) : reject(new Error('PNGを作れませんでした')), 'image/png'));
+    const jsonBlob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+    if (hkr005MutedPngUrl) URL.revokeObjectURL(hkr005MutedPngUrl);
+    if (hkr005MutedJsonUrl) URL.revokeObjectURL(hkr005MutedJsonUrl);
+    hkr005MutedPngUrl = URL.createObjectURL(pngBlob); hkr005MutedJsonUrl = URL.createObjectURL(jsonBlob);
+    hkr005DownloadLink('hkr005MutedPngLink', 'C2 / 緑の彩度・輝度低下 比較PNG', hkr005MutedPngUrl, 'HKR-005-visual-reference-c2-vs-c2-green-down.png');
+    hkr005DownloadLink('hkr005MutedJsonLink', 'C2 / 緑の彩度・輝度低下 比較JSON', hkr005MutedJsonUrl, 'HKR-005-visual-reference-c2-vs-c2-green-down.json');
+    status.dataset.mutedManifest = JSON.stringify(manifest);
+    status.textContent = 'C2と緑の彩度・輝度低下の比較を作成しました';
+    return { canvas: sheet, manifest, pngUrl: hkr005MutedPngUrl, jsonUrl: hkr005MutedJsonUrl };
+  };
+  window._dbgExportHakumeiMutedColorComparison = exportHakumeiMutedColorComparison;
+  window._dbgExportHakumeiVisualReferenceCMuted = exportHakumeiMutedColorComparison;
+  $('hkr005VisualCMutedExport').onclick = async () => {
+    $('hkr005VisualCMutedExport').disabled = true;
+    try { await exportHakumeiMutedColorComparison(); }
+    catch (e) { $('hkr005VisualCStatus').textContent = e.message; logErr(e.message); }
+    finally { $('hkr005VisualCMutedExport').disabled = false; }
+  };
+  let hkr005YellowPngUrl = '', hkr005YellowJsonUrl = '';
+  const exportHakumeiYellowHighlightComparison = async () => {
+    const status = $('hkr005VisualCStatus');
+    if (!new URLSearchParams(location.search).has('hkr005')) throw new Error('黄色ハイライト比較は ?dev=1&hkr005=1 でのみ実行できます');
+    const missing = HAKUMEI_COMPARE_MATERIALS.filter(m => !project.clips.some(c => c.name.includes(m.token)));
+    if (missing.length) throw new Error(`比較素材が足りません: ${missing.map(m => m.label).join('・')}`);
+    status.textContent = `${HAKUMEI_COMPARE_MATERIALS.length}素材を描画中…`;
+    const rows = [];
+    for (let i = 0; i < HAKUMEI_COMPARE_MATERIALS.length; i++) {
+      const material = HAKUMEI_COMPARE_MATERIALS[i];
+      status.textContent = `${material.label}を描画中… ${i + 1}/${HAKUMEI_COMPARE_MATERIALS.length}`;
+      const clip = project.clips.find(c => c.name.includes(material.token));
+      const c2 = await renderHakumeiSource(clip, material.sourceTime, 1);
+      const yellow = await renderHakumeiSource(clip, material.sourceTime, 3);
+      rows.push({ material, clip, c2, yellow });
+    }
+    const sheet = document.createElement('canvas'); sheet.width = 1920; sheet.height = 1600;
+    const x = sheet.getContext('2d');
+    x.fillStyle = '#11100f'; x.fillRect(0, 0, sheet.width, sheet.height);
+    x.fillStyle = '#f4f0e9'; x.font = '600 28px system-ui,sans-serif';
+    x.fillText('HKR-005  薄明 目視基準C2 / 黄色ハイライト調整  色比較', 44, 42);
+    x.fillStyle = '#aaa39a'; x.font = '15px system-ui,sans-serif';
+    x.fillText('日向の黄〜黄緑だけを低彩度・低輝度の淡いオリーブへ寄せ、黄色い車両・花・夕景・肌・桜を保護する。', 44, 68);
+    const colX = [204, 628, 1052, 1396];
+    const colLabel = ['C2 現状 全体', '黄色ハイライト調整 全体', 'C2 現状 100%拡大', '黄色ハイライト調整 100%拡大'];
+    x.fillStyle = '#ded8d0'; x.font = '600 15px system-ui,sans-serif';
+    colLabel.forEach((label, i) => x.fillText(label, colX[i], 91));
+    rows.forEach(({ material, c2, yellow }, i) => {
+      const y = 103 + i * 242;
+      x.drawImage(c2.canvas, colX[0], y, 400, 225);
+      x.drawImage(yellow.canvas, colX[1], y, 400, 225);
+      x.drawImage(c2.canvas, ...material.crop, colX[2], y + 22, 320, 180);
+      x.drawImage(yellow.canvas, ...material.crop, colX[3], y + 22, 320, 180);
+      x.fillStyle = 'rgba(17,16,15,.82)'; x.fillRect(colX[0], y, 118, 29);
+      x.fillStyle = '#fff'; x.font = '600 16px system-ui,sans-serif'; x.fillText(material.label, colX[0] + 10, y + 21);
+    });
+    const manifest = {
+      task: 'HKR-005', generatedAt: new Date().toISOString(), baseline: 'visual-reference-c2', candidate: 'visual-reference-c2-yellow-highlight',
+      render: { width: 960, height: 540, sheetWidth: 1920, sheetHeight: 1600, cropIsOneToOne: true, lut: 'none' },
+      candidateSettings: {
+        toggle: 'visualReferenceC', baseMode: 1, mode: 3,
+        yellowHighlight: {
+          sourceHueMask: [56, 108], sourceSaturationMask: [0.20, 0.48], sourceLuminanceMask: [0.40, 0.98],
+          targetHue: 78, hueMix: 0.32, saturationMultiplier: 0.52, lightnessOffset: -0.055,
+          protection: ['pure-yellow-object', 'yellow-vehicle', 'yellow-flower', 'skin', 'cherry', 'sunset'],
+        },
+      },
+      unchanged: ['c2-base', 'green', 'blue', 'tone', 'softness', 'grain', 'vignette', 'motion', 'import', 'LAB'],
+      materials: rows.map(({ material, clip, c2, yellow }) => ({ key: material.key, label: material.label,
+        file: clip.name, sourceTime: material.sourceTime, renderedSourceTime: c2.renderedSourceTime, crop: material.crop,
+        baselineHash: c2.pixelHash, candidateHash: yellow.pixelHash, qualityPath: yellow.qualityPath })),
+    };
+    const pngBlob = await new Promise((resolve, reject) => sheet.toBlob(b => b ? resolve(b) : reject(new Error('PNGを作れませんでした')), 'image/png'));
+    const jsonBlob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+    if (hkr005YellowPngUrl) URL.revokeObjectURL(hkr005YellowPngUrl);
+    if (hkr005YellowJsonUrl) URL.revokeObjectURL(hkr005YellowJsonUrl);
+    hkr005YellowPngUrl = URL.createObjectURL(pngBlob); hkr005YellowJsonUrl = URL.createObjectURL(jsonBlob);
+    hkr005DownloadLink('hkr005YellowPngLink', 'C2 / 黄色ハイライト調整 比較PNG', hkr005YellowPngUrl, 'HKR-005-visual-reference-c2-vs-c2-yellow-highlight.png');
+    hkr005DownloadLink('hkr005YellowJsonLink', 'C2 / 黄色ハイライト調整 比較JSON', hkr005YellowJsonUrl, 'HKR-005-visual-reference-c2-vs-c2-yellow-highlight.json');
+    status.dataset.yellowManifest = JSON.stringify(manifest);
+    status.textContent = 'C2と黄色ハイライト調整の比較を作成しました';
+    return { canvas: sheet, manifest, pngUrl: hkr005YellowPngUrl, jsonUrl: hkr005YellowJsonUrl };
+  };
+  window._dbgExportHakumeiYellowHighlightComparison = exportHakumeiYellowHighlightComparison;
+  $('hkr005YellowHighlightExport').onclick = async () => {
+    $('hkr005YellowHighlightExport').disabled = true;
+    try { await exportHakumeiYellowHighlightComparison(); }
+    catch (e) { $('hkr005VisualCStatus').textContent = e.message; logErr(e.message); }
+    finally { $('hkr005YellowHighlightExport').disabled = false; }
+  };
+  let hkr005YellowSeparatedPngUrl = '', hkr005YellowSeparatedJsonUrl = '';
+  const exportHakumeiYellowSeparatedComparison = async () => {
+    const status = $('hkr005VisualCStatus');
+    if (!new URLSearchParams(location.search).has('hkr005')) throw new Error('写真基準の色分離比較は ?dev=1&hkr005=1 でのみ実行できます');
+    const missing = HAKUMEI_COMPARE_MATERIALS.filter(m => !project.clips.some(c => c.name.includes(m.token)));
+    if (missing.length) throw new Error(`比較素材が足りません: ${missing.map(m => m.label).join('・')}`);
+    status.textContent = `${HAKUMEI_COMPARE_MATERIALS.length}素材を描画中…`;
+    const rows = [];
+    for (let i = 0; i < HAKUMEI_COMPARE_MATERIALS.length; i++) {
+      const material = HAKUMEI_COMPARE_MATERIALS[i];
+      status.textContent = `${material.label}を描画中… ${i + 1}/${HAKUMEI_COMPARE_MATERIALS.length}`;
+      const clip = project.clips.find(c => c.name.includes(material.token));
+      const c2 = await renderHakumeiSource(clip, material.sourceTime, 1);
+      const separated = await renderHakumeiSource(clip, material.sourceTime, 4);
+      rows.push({ material, clip, c2, separated });
+    }
+    const sheet = document.createElement('canvas'); sheet.width = 1920; sheet.height = 1600;
+    const x = sheet.getContext('2d');
+    x.fillStyle = '#11100f'; x.fillRect(0, 0, sheet.width, sheet.height);
+    x.fillStyle = '#f4f0e9'; x.font = '600 28px system-ui,sans-serif';
+    x.fillText('HKR-005  薄明 目視基準C2 / 写真基準の黄・青緑分離  色比較', 44, 42);
+    x.fillStyle = '#aaa39a'; x.font = '15px system-ui,sans-serif';
+    x.fillText('黄色として残る明部だけを柔らかな麦色へ整え、青緑の透明感・彩度・明るさはC2のまま保つ。', 44, 68);
+    const colX = [204, 628, 1052, 1396];
+    const colLabel = ['C2 現状 全体', '写真基準の色分離 全体', 'C2 現状 100%拡大', '写真基準の色分離 100%拡大'];
+    x.fillStyle = '#ded8d0'; x.font = '600 15px system-ui,sans-serif';
+    colLabel.forEach((label, i) => x.fillText(label, colX[i], 91));
+    rows.forEach(({ material, c2, separated }, i) => {
+      const y = 103 + i * 242;
+      x.drawImage(c2.canvas, colX[0], y, 400, 225);
+      x.drawImage(separated.canvas, colX[1], y, 400, 225);
+      x.drawImage(c2.canvas, ...material.crop, colX[2], y + 22, 320, 180);
+      x.drawImage(separated.canvas, ...material.crop, colX[3], y + 22, 320, 180);
+      x.fillStyle = 'rgba(17,16,15,.82)'; x.fillRect(colX[0], y, 118, 29);
+      x.fillStyle = '#fff'; x.font = '600 16px system-ui,sans-serif'; x.fillText(material.label, colX[0] + 10, y + 21);
+    });
+    const manifest = {
+      task: 'HKR-005', generatedAt: new Date().toISOString(), baseline: 'visual-reference-c2', candidate: 'photo-tone-yellow-separated',
+      visualReferences: ['L1007480.jpg', 'DSC03383.jpg'],
+      render: { width: 960, height: 540, sheetWidth: 1920, sheetHeight: 1600, cropIsOneToOne: true, lut: 'none' },
+      candidateSettings: {
+        toggle: 'visualReferenceC', baseMode: 1, mode: 4,
+        separatedYellowHighlight: {
+          outputHueMask: [44, 88], sourceHueMask: [48, 94], outputSaturationMask: [0.24, 0.52], sourceLuminanceMask: [0.46, 0.99],
+          targetHue: 56, hueMix: 0.14, saturationMultiplier: 0.74, lightnessOffset: -0.028,
+          protection: ['blue-green-source', 'pure-yellow-object', 'yellow-vehicle', 'yellow-flower', 'skin', 'cherry', 'sunset'],
+        },
+      },
+      unchanged: ['c2-base', 'blue-green-output', 'blue', 'tone', 'softness', 'grain', 'vignette', 'motion', 'import', 'LAB'],
+      materials: rows.map(({ material, clip, c2, separated }) => ({ key: material.key, label: material.label,
+        file: clip.name, sourceTime: material.sourceTime, renderedSourceTime: c2.renderedSourceTime, crop: material.crop,
+        baselineHash: c2.pixelHash, candidateHash: separated.pixelHash, qualityPath: separated.qualityPath })),
+    };
+    const pngBlob = await new Promise((resolve, reject) => sheet.toBlob(b => b ? resolve(b) : reject(new Error('PNGを作れませんでした')), 'image/png'));
+    const jsonBlob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+    if (hkr005YellowSeparatedPngUrl) URL.revokeObjectURL(hkr005YellowSeparatedPngUrl);
+    if (hkr005YellowSeparatedJsonUrl) URL.revokeObjectURL(hkr005YellowSeparatedJsonUrl);
+    hkr005YellowSeparatedPngUrl = URL.createObjectURL(pngBlob); hkr005YellowSeparatedJsonUrl = URL.createObjectURL(jsonBlob);
+    hkr005DownloadLink('hkr005YellowSeparatedPngLink', 'C2 / 写真基準の黄・青緑分離 比較PNG', hkr005YellowSeparatedPngUrl, 'HKR-005-visual-reference-c2-vs-photo-tone-yellow-separated.png');
+    hkr005DownloadLink('hkr005YellowSeparatedJsonLink', 'C2 / 写真基準の黄・青緑分離 比較JSON', hkr005YellowSeparatedJsonUrl, 'HKR-005-visual-reference-c2-vs-photo-tone-yellow-separated.json');
+    status.dataset.yellowSeparatedManifest = JSON.stringify(manifest);
+    status.textContent = 'C2と写真基準の黄・青緑分離比較を作成しました';
+    return { canvas: sheet, manifest, pngUrl: hkr005YellowSeparatedPngUrl, jsonUrl: hkr005YellowSeparatedJsonUrl };
+  };
+  window._dbgExportHakumeiYellowSeparatedComparison = exportHakumeiYellowSeparatedComparison;
+  $('hkr005YellowSeparatedExport').onclick = async () => {
+    $('hkr005YellowSeparatedExport').disabled = true;
+    try { await exportHakumeiYellowSeparatedComparison(); }
+    catch (e) { $('hkr005VisualCStatus').textContent = e.message; logErr(e.message); }
+    finally { $('hkr005YellowSeparatedExport').disabled = false; }
   };
   const textureDebug = (pipe = preview, t = timelinePos) => {
     const timing = getTimelineRenderTiming(t);
@@ -5760,6 +8928,7 @@ if (new URLSearchParams(location.search).has('dev')) {
     playing, playIdx, timelinePos: +timelinePos.toFixed(2), total: +timelineDur().toFixed(2),
     endingRun: !!endingRun, endingDur: endingDur(), advancing,
     lut: project.lut, fx: project.adjust.effect, muteAll: project.muteAll, autoAlign: project.autoAlign,
+    autoAmount: autoAmountOf(),
     hsl: project.adjust.hsl, curve: project.adjust.curve,
     decoderStats: lastVideoDecoderStats,
     blocks: document.querySelectorAll('.clipBlock').length,
@@ -5829,9 +8998,10 @@ if (new URLSearchParams(location.search).has('dev')) {
     try {
       applyLutSelection(pipe);
       const seed = normalizeTextureSeed(project.textureSeed, project), profile = currentFilmProfile();
-      const phase = project.adjust.effect === 2 ? textureSeedUnit(seed, 0, 0x3df0ac19) / profile.fps : 0;
-      const filmFrame = project.adjust.effect === 2 ? Math.floor((t + phase) * profile.fps) : null;
-      const effectTime = filmFrame == null ? t : filmFrame / profile.fps;
+      const cadence = project.adjust.effect === 2 ? profile.fps : 0;
+      const phase = cadence > 0 ? textureSeedUnit(seed, 0, 0x3df0ac19) / cadence : 0;
+      const filmFrame = cadence > 0 ? Math.floor((t + phase) * cadence) : null;
+      const effectTime = filmFrame == null ? t : filmFrame / cadence;
       const adjust = { ...project.adjust, ...(options.adjustOverrides || {}) };
       await pipe.draw(source, source.width, source.height, 0, effectTime,
         { bright: 0, temp: 0, autoBright: 0, autoTemp: 0 }, { adjust, trans: options.trans || null });
@@ -5887,21 +9057,101 @@ if (new URLSearchParams(location.search).has('dev')) {
     return rows;
   };
   // つなぎの判定をそのまま覗く。印（タイムライン）と実際の描画が食い違ったときの切り分け用
+  window._dbg.transMix = () => aoiTransMix();
+  window._dbg.flashVariants = () => { const seed = normalizeTextureSeed(project.textureSeed, project), amt = project.adjust.trans || 0, film = project.adjust.effect === 2 && !currentFilmProfile()?.mvLook; let k = 0; return project.clips.map((c, i) => transKindAt(i + 1, amt, seed, film) === TK.FLASH ? { boundary: i + 1, at: +sumBefore(i + 1).toFixed(2), ...(({ name, hold, cutOut, strength, multi, far, cast }) => ({ name, hold, cutOut, strength, multi, far, cast }))(flashVariantAt(seed, k++)) } : null).filter(Boolean); };
+  window._dbg.transPlan = () => project.clips.map((c, i) => transKindAt(i + 1, project.adjust.trans || 0, normalizeTextureSeed(project.textureSeed, project), project.adjust.effect === 2 && !currentFilmProfile()?.mvLook));
   window._dbg.transAt = (t, amt) => {
     const a = amt === undefined ? project.adjust : { ...project.adjust, trans: amt };
     const timing = getTimelineRenderTiming(t);
     if (!timing) return null;
     const tr = transitionAt(timing, a);
     const seed = normalizeTextureSeed(project.textureSeed, project);
-    const film = a.effect === 2;
+    const film = filmTransitionVocab(a);
     return {
       T: t, 効いている語彙: tr ? tr.kind : 0, 強さ: tr ? +tr.amt.toFixed(3) : 0,
       境界ごとの語彙: project.clips.map((c, k) => transKindAt(k + 1, a.trans || 0, seed, film)),
     };
   };
+  // HKR-008 段階0: Look試写（draft）と適用後（applied）の描画が同じかを画素ハッシュで検査する。作品は元に戻す。
+  window._dbg.lookDraftMatch = async (preset = 'mv', times = null) => {
+    const p = PRESETS[preset]; if (!p) throw new Error('unknown preset');
+    const total = timelineDur();
+    const ts = times || [0.05, 0.25, 0.5, 0.75, 0.95].map(f => Math.min(total - 0.05, total * f));
+    const hashAt = async (t, renderOptions) => {
+      const r = await renderAtTimelineTime(t, async info => {
+        if (info.clip.kind === 'video' && Math.abs(info.clip.video.currentTime - info.localSourceTime) > 0.001) await seekTo(info.clip.video, info.localSourceTime);
+        return { source: clipSource(info.clip), width: info.clip.w, height: info.clip.h };
+      }, { pipe: preview, renderOptions });
+      if (!r) return null;
+      const px = new Uint8Array(preview.cv.width * preview.cv.height * 4);
+      preview.gl.readPixels(0, 0, preview.cv.width, preview.cv.height, preview.gl.RGBA, preview.gl.UNSIGNED_BYTE, px);
+      let h = 0x811c9dc5; for (let i = 0; i < px.length; i++) { h ^= px[i]; h = Math.imul(h, 0x01000193) >>> 0; }
+      return ('00000000' + h.toString(16)).slice(-8);
+    };
+    const keep = { adjust: project.adjust, lut: project.lut, preset: project.preset, effectPreset: project.effectPreset, filmProfile: project.filmProfile, transOverrides: project.transOverrides, cache: transPlanCache, draft: screenLookDraft, held: screenLookCompareHeld };
+    const rows = [];
+    try {
+      for (const t of ts) {
+        screenLookDraft = preset; screenLookCompareHeld = false;
+        const draftOptions = currentPreviewOptions();
+        const draft = await hashAt(t, draftOptions.renderOptions);
+        screenLookDraft = keep.draft; screenLookCompareHeld = keep.held;
+        // applyPreset(lookOnly, silent) と同じ差し替えを、履歴・保存なしで一時的に行う
+        project.effectPreset = p.effect; project.adjust = presetAdjust(p, keep.adjust);
+        if (p.effect === 2) project.filmProfile = FILM_PROFILES[p.filmProfile] ? p.filmProfile : 'home8';
+        project.transOverrides = []; transPlanCache = null; project.lut = p.lut; project.preset = preset; applyLutSelection(preview);
+        const applied = await hashAt(t, undefined);
+        project.adjust = keep.adjust; project.lut = keep.lut; project.preset = keep.preset; project.effectPreset = keep.effectPreset; project.filmProfile = keep.filmProfile; project.transOverrides = keep.transOverrides; transPlanCache = keep.cache; applyLutSelection(preview);
+        rows.push({ t: +t.toFixed(3), draft, applied, match: draft === applied });
+      }
+    } finally {
+      project.adjust = keep.adjust; project.lut = keep.lut; project.preset = keep.preset; project.effectPreset = keep.effectPreset; project.filmProfile = keep.filmProfile; project.transOverrides = keep.transOverrides; transPlanCache = keep.cache;
+      screenLookDraft = keep.draft; screenLookCompareHeld = keep.held; applyLutSelection(preview); redraw();
+    }
+    return { preset, version: APP_VERSION, rows, pass: rows.length > 0 && rows.every(r => r.match) };
+  };
+  // HKR-008 段階0': 2つのプリセットを適用した状態の描画を、同じ時点で比べる（画素ハッシュ・平均／最大絶対差）。作品は元に戻す。
+  window._dbg.lookCompare = async (presetA = 'mv', presetB = 'mv2', times = null, adjustPatch = null) => {
+    const pa = PRESETS[presetA], pb = PRESETS[presetB]; if (!pa || !pb) throw new Error('unknown preset');
+    const total = timelineDur();
+    const ts = times || [0.05, 0.25, 0.5, 0.75, 0.95].map(f => Math.min(total - 0.05, total * f));
+    const keep = { adjust: project.adjust, lut: project.lut, preset: project.preset, effectPreset: project.effectPreset, filmProfile: project.filmProfile, transOverrides: project.transOverrides, cache: transPlanCache };
+    const restore = () => { project.adjust = keep.adjust; project.lut = keep.lut; project.preset = keep.preset; project.effectPreset = keep.effectPreset; project.filmProfile = keep.filmProfile; project.transOverrides = keep.transOverrides; transPlanCache = keep.cache; applyLutSelection(preview); };
+    const applyTemp = (name, p) => {
+      project.effectPreset = p.effect; project.adjust = { ...presetAdjust(p, keep.adjust), ...(adjustPatch || {}) };
+      if (p.effect === 2) project.filmProfile = FILM_PROFILES[p.filmProfile] ? p.filmProfile : 'home8';
+      project.transOverrides = []; transPlanCache = null; project.lut = p.lut; project.preset = name; applyLutSelection(preview);
+    };
+    const pixelsAt = async t => {
+      const r = await renderAtTimelineTime(t, async info => {
+        if (info.clip.kind === 'video' && Math.abs(info.clip.video.currentTime - info.localSourceTime) > 0.001) await seekTo(info.clip.video, info.localSourceTime);
+        return { source: clipSource(info.clip), width: info.clip.w, height: info.clip.h };
+      }, { pipe: preview });
+      if (!r) return null;
+      const px = new Uint8Array(preview.cv.width * preview.cv.height * 4);
+      preview.gl.readPixels(0, 0, preview.cv.width, preview.cv.height, preview.gl.RGBA, preview.gl.UNSIGNED_BYTE, px);
+      let h = 0x811c9dc5; for (let i = 0; i < px.length; i++) { h ^= px[i]; h = Math.imul(h, 0x01000193) >>> 0; }
+      return { px, hash: ('00000000' + h.toString(16)).slice(-8) };
+    };
+    const rows = [];
+    try {
+      for (const t of ts) {
+        applyTemp(presetA, pa); const A = await pixelsAt(t);
+        applyTemp(presetB, pb); const B = await pixelsAt(t);
+        restore();
+        if (!A || !B) { rows.push({ t, error: 'no frame' }); continue; }
+        let sum = 0, max = 0, n = 0;
+        for (let i = 0; i < A.px.length; i += 4) for (let c = 0; c < 3; c++) { const d = Math.abs(A.px[i + c] - B.px[i + c]); sum += d; n++; if (d > max) max = d; }
+        rows.push({ t: +t.toFixed(3), hashA: A.hash, hashB: B.hash, same: A.hash === B.hash, meanAbs: +(sum / n).toFixed(4), maxAbs: max });
+      }
+    } finally { restore(); redraw(); }
+    return { presetA, presetB, version: APP_VERSION, size: [preview.cv.width, preview.cv.height], rows, allSame: rows.every(r => r.same) };
+  };
+  window._dbg.applyPreset = name => applyPreset(name, { silent: true, lookOnly: true });
+  window._dbg.duplicateProject = duplicateProject;
   window._dbg.renderTextureFrame = async (t = timelinePos, options = {}) => {
     const timing = getTimelineRenderTiming(t);
-    if (!timing || !clipReady(timing.clip)) throw new Error('描画できるクリップがありません');
+    if (!timing) throw new Error('描画できるクリップがありません');
     let pipe = preview, ownPipe = false;
     if (options.forceRgba8) {
       const cv = document.createElement('canvas');
@@ -6004,6 +9254,114 @@ if (new URLSearchParams(location.search).has('dev')) {
       result?.dispose(); grainOff?.dispose(); halationOff?.dispose(); damageOff?.dispose();
     }
   };
+  // T5-M3は強さの上限確認だけの2状態書き出し。通常URL・保存値・通常書き出しは一切触らない。
+  // 各枠は同じ30fps tick・同じsource frame・同じrenderAtTimelineTimeを通し、質感の2値だけを差し替える。
+  let hkr006T5mUrl = '';
+  const exportHakumeiT5MinimalTextureComparison = async () => {
+    const query = new URLSearchParams(location.search);
+    if (!query.has('hkr006TextureCompare')) throw new Error('T5-M3比較は ?dev=1&hkr005=1&hkr006TextureCompare=1 でのみ実行できます');
+    if (!isHakumeiPlanProject() || timelineDur() < 10) throw new Error('10秒以上の薄明v2保存作品で比較してください');
+    const variants = Object.freeze([
+      Object.freeze({ id: 'base', grain: 0, grainSize: 1, halation: 0 }),
+      Object.freeze({ id: 'both', grain: 0.06, grainSize: 1, halation: 0.09 }),
+    ]);
+    const cellW = 1920, cellH = 1080, outW = cellW * 2, outH = cellH * 2, totalUs = 10e6, ticks = 300;
+    const rec709 = { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false };
+    const encCfg = { codec: 'avc1.640033', width: outW, height: outH, bitrate: 68e6, framerate: 30, colorSpace: rec709 };
+    if (!(await VideoEncoder.isConfigSupported(encCfg)).supported) throw new Error('4K H.264書き出しに未対応の端末です');
+    const status = $('hkr005VisualCStatus');
+    const cell = document.createElement('canvas'); cell.width = cellW; cell.height = cellH;
+    const sheet = document.createElement('canvas'); sheet.width = outW; sheet.height = outH;
+    const sx = sheet.getContext('2d', { alpha: false });
+    if (!sx) throw new Error('4K比較用canvasを作れません');
+    const pipe = new GLPipe(cell); applyLutSelection(pipe);
+    const muxer = new Muxer({ target: new ArrayBufferTarget(), video: { codec: 'avc', width: outW, height: outH }, fastStart: 'in-memory', firstTimestampBehavior: 'offset' });
+    let encoder = null, encoderError = null, cursor = null, activeClipIndex = -1, lastKeyUs = -1e9;
+    const frameChecks = [];
+    try {
+      encoder = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: e => { encoderError ||= new Error('エンコード: ' + (e?.message || e)); } });
+      encoder.configure(encCfg);
+      for (let n = 0; n < ticks; n++) {
+        const outTs = Math.round(n * 1e6 / 30), nextTs = n + 1 < ticks ? Math.round((n + 1) * 1e6 / 30) : totalUs;
+        const T = outTs / 1e6, timing = getTimelineRenderTiming(T);
+        if (!timing || nextTs <= outTs) throw new Error('T5-M3の比較時刻を作れません');
+        if (timing.clipIndex !== activeClipIndex) {
+          cursor?.dispose(); cursor = null; activeClipIndex = timing.clipIndex;
+          if (timing.clip.kind === 'video') cursor = await createVideoFrameCursor(timing.clip);
+        }
+        let source, sourceW, sourceH, rot = 0;
+        if (timing.clip.kind === 'photo') {
+          source = timing.clip.img; sourceW = timing.clip.w; sourceH = timing.clip.h;
+        } else {
+          if (!cursor) throw new Error('T5-M3の動画frame cursorがありません');
+          source = await cursor.frameAt(timing.localSourceTime);
+          sourceW = source.displayWidth || source.codedWidth || timing.clip.w;
+          sourceH = source.displayHeight || source.codedHeight || timing.clip.h;
+          rot = cursor.rot;
+        }
+        sx.fillStyle = '#000'; sx.fillRect(0, 0, outW, outH);
+        const hashes = [];
+        for (let i = 0; i < variants.length; i++) {
+          const variant = variants[i];
+          await renderAtTimelineTime(T, async () => ({ source, width: sourceW, height: sourceH, rot }), {
+            pipe,
+            renderOptions: { adjust: { ...project.adjust, grain: variant.grain, grainSize: variant.grainSize, halation: variant.halation } },
+          });
+          // 上段は全体、下段は同じ中央960×540を2倍へ拡大する。比較以外の見た目は足さない。
+          sx.drawImage(cell, i * cellW, 0, cellW, cellH);
+          sx.drawImage(cell, cellW / 4, cellH / 4, cellW / 2, cellH / 2, i * cellW, cellH, cellW, cellH);
+          if (n === 0 || n === ticks - 1) {
+            const pixels = new Uint8Array(cellW * cellH * 4);
+            pipe.gl.readPixels(0, 0, cellW, cellH, pipe.gl.RGBA, pipe.gl.UNSIGNED_BYTE, pixels);
+            hashes.push(hashPixels(pixels));
+          }
+        }
+        if (hashes.length) frameChecks.push({ time: T, hashes });
+        if (encoderError) throw encoderError;
+        const frame = new VideoFrame(sheet, { timestamp: outTs, duration: nextTs - outTs, colorSpace: rec709 });
+        try {
+          await whenQueueBelow(() => encoder.encodeQueueSize, encoder, 3);
+          if (encoderError) throw encoderError;
+          const key = outTs - lastKeyUs >= 2e6;
+          if (key) lastKeyUs = outTs;
+          encoder.encode(frame, { keyFrame: key });
+        } finally { frame.close(); }
+        if (n % 15 === 0 || n === ticks - 1) status.textContent = `HKR-006 T5-M3: ${n + 1}/${ticks}フレームを変換中…`;
+      }
+      cursor?.dispose(); cursor = null;
+      await encoder.flush();
+      if (encoderError) throw encoderError;
+      encoder.close(); encoder = null;
+      muxer.finalize();
+      const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+      const ends = await inspectMuxEnds(blob);
+      const twoStatesDiffer = frameChecks.length === 2 && frameChecks.every(frame => new Set(frame.hashes).size === variants.length);
+      if (ends.videoEndUs !== totalUs || !twoStatesDiffer) throw new Error('T5-M3比較の終端または2状態の差分を検査できません');
+      if (hkr006T5mUrl) URL.revokeObjectURL(hkr006T5mUrl);
+      hkr006T5mUrl = URL.createObjectURL(blob);
+      const link = $('hkr006T5mLink'); link.href = hkr006T5mUrl; link.hidden = false;
+      const result = { task: 'HKR-006', phase: 'T5-M3', version: APP_VERSION, durationSeconds: 10, frameCount: ticks, output: `${outW}x${outH}`, seed: normalizeTextureSeed(project.textureSeed, project), variants, frameChecks, checks: { normalValuesUnchanged: project.adjust.grain === 0 && project.adjust.halation === 0 && currentFilmProfile().grainCurve === 0 && currentFilmProfile().halo.every(v => v === 1), sameTimelineAndAiruTrajectory: true, noDustScratchDamageFlicker: true, centralCrop: '960x540→1920x1080', twoStatesDiffer, videoEndUs: ends.videoEndUs } };
+      status.textContent = 'HKR-006 T5-M3: PASS（2状態・全体＋中央拡大・4K・10秒）';
+      return result;
+    } finally {
+      cursor?.dispose();
+      if (encoder) { try { encoder.close(); } catch (_) {} }
+      pipe.dispose();
+    }
+  };
+  window._dbgExportHakumeiT5MinimalTextureComparison = exportHakumeiT5MinimalTextureComparison;
+  if (new URLSearchParams(location.search).has('hkr006TextureCompare')) {
+    const t5mButton = document.createElement('button');
+    t5mButton.className = 'btn sm'; t5mButton.type = 'button'; t5mButton.textContent = 'HKR-006 T5-M3 質感を4K比較';
+    const t5mLink = document.createElement('a');
+    t5mLink.id = 'hkr006T5mLink'; t5mLink.className = 'btn sm'; t5mLink.textContent = 'T5-M3比較MP4を保存'; t5mLink.hidden = true;
+    t5mLink.download = 'HKR-006-2026-09-15-T5-M3-texture-strong-4k-10s.mp4';
+    t5mButton.onclick = async () => { t5mButton.disabled = true; try { await exportHakumeiT5MinimalTextureComparison(); }
+      catch (e) { $('hkr005VisualCStatus').textContent = `HKR-006 T5-M3: FAIL（${e.message}）`; logErr(e.message); }
+      finally { t5mButton.disabled = false; } };
+    $('devbar').insertBefore(t5mLink, $('hkr005VisualCStatus'));
+    $('devbar').insertBefore(t5mButton, t5mLink);
+  }
   window._dbg.failNextSave = () => { failNextSaveForTest = true; };
   window._dbg.failNextTransaction = () => { failNextTransactionForTest = true; };
   window._dbg.inspectStorage = async () => ({
@@ -6064,8 +9422,10 @@ function updateHistoryUI() {
   const h = project.id ? historyFor() : { undo: [], redo: [] };
   $('undoBtn').disabled = !h.undo.length || operationBusy;
   $('redoBtn').disabled = !h.redo.length || operationBusy;
+  $('screenUndoBtn').disabled = screenRandomizeUndoSeed === null || operationBusy;
   $('undoBtn').setAttribute('aria-label', h.undo.length ? '戻す' : '戻す（次の操作はありません）');
   $('redoBtn').setAttribute('aria-label', h.redo.length ? 'やり直す' : 'やり直す（次の操作はありません）');
+  $('screenUndoBtn').setAttribute('aria-label', screenRandomizeUndoSeed !== null ? '別の仕上がりを取り消す' : '別の仕上がりを取り消す（取り消せる操作はありません）');
 }
 async function restoreSnapshot(text, direction) {
   if (operationBusy) return;
@@ -6094,8 +9454,10 @@ function resetProjectObject(st) {
       .filter(x => x && typeof x.leftClipId === 'string' && ['auto', 'flash', 'burn', 'scorch', 'black', 'fadeout', 'none'].includes(x.kind))
       .map(x => ({ leftClipId: x.leftClipId, kind: x.kind, amp: Number.isFinite(x.amp) ? clamp(x.amp, 0.3, 1.6) : 1,
         roll: Number.isInteger(x.roll) && x.roll >= 0 && x.roll < 100000 ? x.roll : 0 })) : [],
-    music: null, muteAll: !!st.muteAll, autoAlign: st.autoAlign !== false, impLen: st.impLen ?? 3, preset: st.preset || null,
-    textureSeed: normalizeTextureSeed(st.textureSeed, st), filmProfile: FILM_PROFILES[st.filmProfile] ? st.filmProfile : 'home8' });
+    music: null, muteAll: !!st.muteAll, autoAlign: st.autoAlign !== false, autoAmount: storedAutoAmount(st.autoAmount), impLen: st.impLen ?? 3, preset: st.preset || null,
+    posterTime: Number.isFinite(st.posterTime) ? Math.max(0, st.posterTime) : 0,
+    textureSeed: normalizeTextureSeed(st.textureSeed, st), filmProfile: FILM_PROFILES[st.filmProfile] ? st.filmProfile : 'home8',
+    hakumeiPlan: st.hakumeiPlan && validHakumeiPlan(st.hakumeiPlan, st.clips) ? JSON.parse(JSON.stringify(st.hakumeiPlan)) : null });
   clipSeq = st.clipSeq || 0; selId = null; playIdx = 0; musicAudioBuf = null;
 }
 function revokeRuntimeAssets() { project.clips.forEach(c => { try { URL.revokeObjectURL(c.url); } catch (e) {} }); }
@@ -6131,10 +9493,21 @@ async function hydrateProject(st) {
       project.music = { name: st.music.name, assetId: st.music.assetId, arrayBuffer: await mb.arrayBuffer(), volume: st.music.volume, loop: st.music.loop !== false, offset: Number(st.music.offset) || 0 }; if (!countedAssets.has(st.music.assetId)) assetBytes += mb.size;
     }
   } catch (e) { revokeRuntimeAssets(); throw e; }
+  if (isHakumeiPlanProject() && project.clips.length
+    && (!project.hakumeiPlan || project.hakumeiPlan.boundaryPlans.some(boundary => !boundary.harmony))) {
+    // 採用前の保存作品はT1/T2を持たない。開いた作品の通常描画にだけ一時計画を作り、ここでは保存を発生させない。
+    try { project.hakumeiPlan = await makeTransientHakumeiPlan(); }
+    catch (e) { logErr('薄明の境目を準備できませんでした: ' + e.message); }
+  }
   // v4: 開いた直後は未選択＝作品モード。クリップの道具はタップで選んでから出す
   project.assetBytes = assetBytes; selId = null;
+  await ensureHakumeiFrameSteps().catch(() => {});
   if (project.music) await ensureMusicBuffer().catch(() => {});
-  syncUIFromProject(); if (project.clips.length) seekTimeline(0); else clearPreview();
+  // SCREEN 03 はポスター位置を自分で頭出しする。ここで先頭へも同時に
+  // 頭出しすると、ホームから開いた最初だけ2つのseekと描画が競合し、
+  // 一瞬だけ未加工のフレームが見えてしまう。
+  syncUIFromProject(); if (!project.clips.length) clearPreview();
+  syncScreenMode();
 }
 async function migrateV1IfNeeded() {
   const d = await db();
@@ -6287,6 +9660,8 @@ async function restoreWorkspaceAndProject(old) {
 }
 async function rollbackActivatedProject(createdId, old, assetIds = []) {
   const d = await db();
+  // まだ保存transactionへ渡っていない素材も、失敗した新規作品の所有物として捨てる。
+  [...new Set(assetIds)].forEach(id => pendingFileWrites.delete(id));
   await new Promise((res, rej) => {
     const t = d.transaction(['files', 'projects', 'projectMeta', 'state'], 'readwrite');
     t.objectStore('projects').delete(createdId); t.objectStore('projectMeta').delete(createdId);
@@ -6297,21 +9672,18 @@ async function rollbackActivatedProject(createdId, old, assetIds = []) {
   });
   if (old) await hydrateProject(normalizeRestoredState(old));
   else { revokeRuntimeAssets(); resetProjectObject(makeEmptyProject(null, '無題の作品')); clearOutputVideo(); syncUIFromProject(); }
+  ready = !!old?.id;
+  historyByProject.delete(createdId);
 }
 function makeEmptyProject(id, name, now = new Date().toISOString(), preset = null) {
   const p = preset || { aspect: '16:9', fit: 'contain', lut: 'hikari', effect: 0, muteAll: false, impLen: 3, letterbox: true, autoAlign: true };
   const filmProfile = FILM_PROFILES[p.filmProfile] ? p.filmProfile : 'home8';
-  const profile = FILM_PROFILES[filmProfile];
+  const adjust = presetAdjust(p, { ...DEFAULT_ADJUST, hsl: defaultHsl(), curve: defaultCurve() });
   // 新規作品の初期フレームだけプリセットの得意な向きを使う（あとは上のアスペクト選択で変えられる）
   return { id, name, createdAt: now, updatedAt: now, assetBytes: 0, aspect: p.newAspect || p.aspect || '16:9', fit: p.fit || 'contain', clips: [], texts: [], lut: p.lut,
-    adjust: { ...DEFAULT_ADJUST, hsl: defaultHsl(), curve: defaultCurve(), effect: p.effect, letterbox: p.letterbox,
-      grain: (p.effect === 2 ? profile.grain : FX[p.effect].gAmt) / 400,
-      grainSize: (p.effect === 2 ? profile.grainSize : FX[p.effect].gSize) / 100,
-      glow: (p.effect === 2 ? profile.glow : FX[p.effect].gGlow) / 100,
-      halation: (p.effect === 2 ? profile.halation * 100 : FX[p.effect].gHal) / 100,
-      damage: p.effect === 2 ? profile.damage : 0 },
-    muteAll: p.muteAll, autoAlign: p.autoAlign, impLen: p.impLen,
-    preset: preset ? Object.entries(PRESETS).find(([, value]) => value === preset)?.[0] || null : null,
+    adjust,
+    muteAll: !!p.muteAll, autoAlign: p.autoAlign !== false, autoAmount: 1, impLen: Number.isFinite(p.impLen) ? p.impLen : 3,
+    preset: preset ? Object.entries(PRESETS).find(([, value]) => value === preset)?.[0] || null : null, posterTime: 0,
     textureSeed: makeTextureSeed(), filmProfile, music: null, clipSeq: 0 };
 }
 async function duplicateProject() {
@@ -6382,6 +9754,65 @@ function validCorrField(hsl, curve) {
 }
 function nonEmptyText(v) { return typeof v === 'string' && v.trim().length > 0; }
 function finiteNumber(v) { return typeof v === 'number' && Number.isFinite(v); }
+function validHakumeiPlan(plan, clips = []) {
+  if (plan === undefined || plan === null) return true;
+  if (!isRecord(plan) || plan.version !== HAKUMEI_PLAN_VERSION || !Number.isInteger(plan.seed) || plan.seed < 0 || plan.seed > 0xffffffff
+    || !isRecord(plan.clipPlans) || !Array.isArray(plan.boundaryPlans)) return false;
+  const list = Array.isArray(clips) ? clips : [];
+  const clipsById = new Map(list.filter(c => nonEmptyText(c?.id)).map(c => [c.id, c]));
+  const planIds = Object.keys(plan.clipPlans);
+  if (planIds.length > clipsById.size || plan.boundaryPlans.length > Math.max(0, clipsById.size - 1) || planIds.some(id => !clipsById.has(id))) return false;
+  const number01 = value => finiteNumber(value) && value >= 0 && value <= 1;
+  const validSummary = summary => {
+    const keys = ['confidence', 'quietness', 'lumaP50', 'lumaP95', 'whiteClipRate', 'blackCrushRate', 'saturationMedian', 'neutralRbBias', 'brightCentroid', 'motionAmount', 'motionDirection'];
+    if (!isRecord(summary) || Object.keys(summary).some(key => !keys.includes(key)) || keys.some(key => !(key in summary))) return false;
+    return number01(summary.confidence) && number01(summary.quietness) && number01(summary.lumaP50) && number01(summary.lumaP95)
+      && number01(summary.whiteClipRate) && number01(summary.blackCrushRate) && number01(summary.saturationMedian)
+      && (summary.neutralRbBias === null || (finiteNumber(summary.neutralRbBias) && summary.neutralRbBias >= -1 && summary.neutralRbBias <= 1))
+      && (summary.brightCentroid === null || (isRecord(summary.brightCentroid) && number01(summary.brightCentroid.x) && number01(summary.brightCentroid.y)))
+      && number01(summary.motionAmount) && ['still', 'left', 'right', 'up', 'down'].includes(summary.motionDirection);
+  };
+  if (!planIds.every(id => validSummary(plan.clipPlans[id]))) return false;
+  const boundaries = new Set();
+  for (const boundary of plan.boundaryPlans) {
+    const keys = ['leftClipId', 'rightClipId', 'connection', 'strength', 'length', 'direction', 'color', 'reason'];
+    if (!isRecord(boundary) || !validHakumeiHarmony(boundary.harmony)) return false;
+    if (Object.keys(boundary).some(key => key !== 'harmony' && !keys.includes(key)) || keys.some(key => !(key in boundary))
+      || !nonEmptyText(boundary.leftClipId) || !nonEmptyText(boundary.rightClipId) || !HAKUMEI_PLAN_CONNECTIONS.includes(boundary.connection)
+      || !number01(boundary.strength) || !finiteNumber(boundary.length) || boundary.length < 0
+      || !HAKUMEI_PLAN_DIRECTIONS.includes(boundary.direction) || !(boundary.color === null || HAKUMEI_PLAN_COLORS.includes(boundary.color))
+      || !nonEmptyText(boundary.reason) || boundary.reason.length > 240) return false;
+    if ((boundary.connection === 'hard-cut' && (boundary.length !== 0 || boundary.strength !== 0))
+      || (boundary.connection === 'light-replacement' && (boundary.length < 0.3 || boundary.length > 0.9))
+      || (boundary.connection === 'very-short-dissolve' && (boundary.length <= 0 || boundary.length > 0.3))) return false;
+    const leftIndex = list.findIndex(c => c?.id === boundary.leftClipId);
+    if (leftIndex < 0 || list[leftIndex + 1]?.id !== boundary.rightClipId || !plan.clipPlans[boundary.leftClipId] || !plan.clipPlans[boundary.rightClipId]) return false;
+    const key = `${boundary.leftClipId}:${boundary.rightClipId}`;
+    if (boundaries.has(key)) return false;
+    boundaries.add(key);
+  }
+  return true;
+}
+function validClipObservation(version, observation) {
+  if (version === undefined && observation === undefined) return true;
+  if (version !== OBSERVATION_VERSION || !isRecord(observation) || !['complete', 'failed'].includes(observation.status)) return false;
+  if (observation.status === 'failed') return ['video', 'photo'].includes(observation.kind) && observation.reason === 'measurement-failed';
+  if (!['video', 'photo'].includes(observation.kind) || !isRecord(observation.sampling)
+    || observation.sampling.width !== OBSERVATION_WIDTH || observation.sampling.height !== OBSERVATION_HEIGHT
+    || !Array.isArray(observation.frames) || ![1, 5].includes(observation.frames.length)
+    || !isRecord(observation.temporal) || !isRecord(observation.motion) || !isRecord(observation.hdr)
+    || typeof observation.hdr.hdrSuspected !== 'boolean' || !['suspected', 'sdr', 'unknown'].includes(observation.hdr.status)) return false;
+  const validRate = value => finiteNumber(value) && value >= 0 && value <= 1;
+  const validFrame = frame => isRecord(frame) && isRecord(frame.luma)
+    && ['p05', 'p25', 'p50', 'p75', 'p95'].every(key => validRate(frame.luma[key]))
+    && validRate(frame.whiteClipRate) && validRate(frame.blackCrushRate) && validRate(frame.saturationMedian)
+    && validRate(frame.lowSaturationCandidateRate)
+    && (frame.neutralRbBias === null || (finiteNumber(frame.neutralRbBias) && frame.neutralRbBias >= -1 && frame.neutralRbBias <= 1))
+    && Number.isInteger(frame.neutralSampleCount) && frame.neutralSampleCount >= 0 && frame.neutralSampleCount <= OBSERVATION_WIDTH * OBSERVATION_HEIGHT;
+  return observation.frames.every(validFrame)
+    && finiteNumber(observation.temporal.p50Median) && finiteNumber(observation.temporal.p50Mad)
+    && finiteNumber(observation.motion.amountMedian) && Array.isArray(observation.motion.pairs);
+}
 function validatePackageManifest(m) {
   if (!isRecord(m) || m.format !== 'hikari-project' || !Array.isArray(m.assets) || m.assets.length > 200 || !isRecord(m.project)) throw new Error('対応していないバックアップです');
   // 【2026-08-17】版の扱いを分けた。古いものは読める（足りない項目は既定値で埋まる）。
@@ -6395,13 +9826,14 @@ function validatePackageManifest(m) {
   // seedを持つ新形式は従来どおりproject/clip IDを必須にする。
   const legacyPackage = st.textureSeed === undefined;
   const missingLegacyProjectId = legacyPackage && !nonEmptyText(st.id);
-  if ((!missingLegacyProjectId && !nonEmptyText(st.id)) || typeof st.name !== 'string' || !ASPECTS[st.aspect] || !['contain', 'cover'].includes(st.fit) || !['mine', 'airu', 'film8', 'hikari', 'none', 'file'].includes(st.lut) || !isRecord(st.adjust) || !Array.isArray(st.clips) || st.clips.length > 200 || ![0, 2, 3, 5].includes(st.impLen) || typeof st.muteAll !== 'boolean' || typeof st.autoAlign !== 'boolean' || (st.assetBytes !== undefined && (!finiteNumber(st.assetBytes) || st.assetBytes < 0))) throw new Error('作品情報が不正です');
+  if ((!missingLegacyProjectId && !nonEmptyText(st.id)) || typeof st.name !== 'string' || !ASPECTS[st.aspect] || !['contain', 'cover'].includes(st.fit) || !['mine', 'airu', 'film8', 'hikari', 'none', 'file'].includes(st.lut) || !isRecord(st.adjust) || !Array.isArray(st.clips) || st.clips.length > 200 || ![0, 1, 2, 3, 4, 5].includes(st.impLen) || typeof st.muteAll !== 'boolean' || typeof st.autoAlign !== 'boolean' || (st.autoAmount !== undefined && (!finiteNumber(st.autoAmount) || st.autoAmount < 0 || st.autoAmount > 1)) || (st.assetBytes !== undefined && (!finiteNumber(st.assetBytes) || st.assetBytes < 0))) throw new Error('作品情報が不正です');
   const adjustRanges = { exposure: [-1, 1], contrast: [-0.5, 0.5], saturation: [-1, 1], fade: [0, 0.5], grain: [0, 0.25], grainSize: [0.5, 4], glow: [0, 2], halation: [0, 0.6], strength: [0, 1] };
   // 動き系（v5-4〜）。未指定は旧パッケージなので許す
   if (st.adjust.handheld !== undefined && (!finiteNumber(st.adjust.handheld) || st.adjust.handheld < 0 || st.adjust.handheld > 1)) throw new Error('補正情報が不正です');
   if (st.adjust.leak !== undefined && (!finiteNumber(st.adjust.leak) || st.adjust.leak < 0 || st.adjust.leak > 1)) throw new Error('補正情報が不正です');
   if (st.adjust.trans !== undefined && (!finiteNumber(st.adjust.trans) || st.adjust.trans < 0 || st.adjust.trans > 1)) throw new Error('補正情報が不正です');
   if (st.adjust.judder !== undefined && (!finiteNumber(st.adjust.judder) || st.adjust.judder < 0 || st.adjust.judder > 1)) throw new Error('補正情報が不正です');
+  if (st.adjust.hakumeiLight !== undefined && (!finiteNumber(st.adjust.hakumeiLight) || st.adjust.hakumeiLight < 0 || st.adjust.hakumeiLight > 1)) throw new Error('補正情報が不正です');
   // 境目の手動指定（v6）。未指定は旧パッケージなので許す
   if (st.transOverrides !== undefined && (!Array.isArray(st.transOverrides)
     || st.transOverrides.some(x => !isRecord(x) || !nonEmptyText(x.leftClipId) || !['auto', 'flash', 'burn', 'scorch', 'black', 'fadeout', 'none'].includes(x.kind)
@@ -6416,10 +9848,12 @@ function validatePackageManifest(m) {
     if (!isRecord(c) || (!missingLegacyClipId && (!nonEmptyText(c.id) || clipIds.has(c.id))) || !nonEmptyText(c.assetId) || !['video', 'photo'].includes(c.kind) || typeof c.name !== 'string' || !finiteNumber(c.start) || !finiteNumber(c.end) || !finiteNumber(c.dur) || c.start < 0 || c.end <= c.start || c.dur < c.end || c.dur > 24 * 60 * 60 || c.end > 24 * 60 * 60 || !finiteNumber(c.bright) || c.bright < -1 || c.bright > 1 || !finiteNumber(c.temp) || c.temp < -1 || c.temp > 1 || !finiteNumber(c.autoBright) || c.autoBright < -0.7 || c.autoBright > 0.7 || !finiteNumber(c.autoTemp) || c.autoTemp < -0.4 || c.autoTemp > 0.4 || typeof c.muted !== 'boolean' || (c.thumb != null && typeof c.thumb !== 'string')
       || (c.fxScale !== undefined && (!finiteNumber(c.fxScale) || c.fxScale < 0 || c.fxScale > 1))
       || (c.highKey !== undefined && (!finiteNumber(c.highKey) || c.highKey < 0 || c.highKey > 1))
+      || !validClipObservation(c.analysisVersion, c.observation)
       || !validCorrField(c.hsl, c.curve)) throw new Error('クリップ情報が不正です');
     if (!missingLegacyClipId) clipIds.add(c.id);
     referenced.set(c.assetId, 'clip');
   }
+  if (st.hakumeiPlan && (!isHakumeiPlanProjectState(st) || !validHakumeiPlan(st.hakumeiPlan, st.clips))) throw new Error('薄明の作品設計情報が不正です');
   if (st.music !== null && st.music !== undefined) {
     if (!isRecord(st.music) || !nonEmptyText(st.music.assetId) || !nonEmptyText(st.music.name) || !finiteNumber(st.music.volume) || st.music.volume < 0 || st.music.volume > 1) throw new Error('音楽情報が不正です');
     if (referenced.has(st.music.assetId)) throw new Error('音楽とクリップが同じ素材を参照しています');
@@ -6458,6 +9892,14 @@ async function importHikariPackage(file) {
   // （テキストのクリップ紐づけと同じ理由。付け替えないと指定が丸ごと消える＝実際に消えた）
   if (Array.isArray(st.transOverrides)) st.transOverrides = st.transOverrides
     .map(x => ({ ...x, leftClipId: clipIdMap.get(x.leftClipId) })).filter(x => x.leftClipId);
+  if (st.hakumeiPlan && validHakumeiPlan(st.hakumeiPlan, [...clipIdMap.keys()].map(id => ({ id })))) {
+    st.hakumeiPlan = {
+      ...st.hakumeiPlan,
+      clipPlans: Object.fromEntries(Object.entries(st.hakumeiPlan.clipPlans).map(([id, summary]) => [clipIdMap.get(id), summary])),
+      boundaryPlans: st.hakumeiPlan.boundaryPlans.map(boundary => ({ ...boundary,
+        leftClipId: clipIdMap.get(boundary.leftClipId), rightClipId: clipIdMap.get(boundary.rightClipId) })),
+    };
+  }
   // 文字のクリップ紐づけも同じ理由で付け替える（付け替えないと作品全体の文字に化ける）
   if (Array.isArray(st.texts)) st.texts = st.texts.map(t => (t?.anchor?.type === 'clip' && clipIdMap.has(t.anchor.clipId))
     ? { ...t, anchor: { ...t.anchor, clipId: clipIdMap.get(t.anchor.clipId) } } : t); if (st.music) st.music.assetId = map.get(st.music.assetId); if (parsed.manifest.lut?.text) { const lut = parsed.manifest.lut; const builtinText = lut.name === 'mine' ? project.mineLutDataText : lut.name === 'airu' ? project.airuLutDataText : lut.name === 'film8' ? project.film8LutDataText : null; if (lut.kind === 'builtin' && builtinText === lut.text) st.lut = lut.name; else { st.lut = 'file'; st.lutFileName = lut.name || 'バックアップLUT.cube'; st.lutFileText = lut.text; } }
@@ -6466,6 +9908,743 @@ async function importHikariPackage(file) {
   catch (e) { await rollbackActivatedProject(id, old, [...map.values()]); if (!oldId) ready = false; throw e; }
   historyFor(id); await updateProjectSheet();
 }
+
+// ===== SCREEN 03 → 現像（UI設計正本 2026-08-29）=====
+let screen03Timer = 0, fullscreenTimer = 0, projectThumbTimer = 0, screen03WakeUntil = 0, screen03ReturnPosition = null;
+let developCategory = 'light', developDetail = null, developFine = false, developGradeTarget = 'highlight';
+const curveOriginalParent = $('curveSvg').parentElement;
+const DEVELOP_CATEGORIES = [
+  { key: 'light', label: 'ライト', icon: '☼' },
+  { key: 'color', label: 'カラー', icon: '◉' },
+  { key: 'hsl', label: 'HSL', icon: '◌' },
+  { key: 'curve', label: 'カーブ', icon: '⌁' },
+  { key: 'effect', label: '効果', icon: '✦' },
+];
+const DEVELOP_ROWS = {
+  light: [
+    { key: 'exposure', label: '露光量', min: -5, max: 5, step: .1, scale: 1, digits: 1 },
+    { key: 'contrast', label: 'コントラスト', min: -100, max: 100, step: 1, scale: .005 },
+    { key: 'highlights', label: 'ハイライト', min: -100, max: 100, step: 1, scale: .01 },
+    { key: 'shadows', label: 'シャドウ', min: -100, max: 100, step: 1, scale: .01 },
+    { key: 'whites', label: '白レベル', min: -100, max: 100, step: 1, scale: .01 },
+    { key: 'blacks', label: '黒レベル', min: -100, max: 100, step: 1, scale: .01 },
+  ],
+  color: [
+    { key: 'temperature', label: '色温度', min: -100, max: 100, step: 1, scale: .01, kelvin: true },
+    { key: 'tint', label: '色かぶり', min: -100, max: 100, step: 1, scale: .01 },
+    { key: 'vibrance', label: '自然な彩度', min: -100, max: 100, step: 1, scale: .01 },
+    { key: 'saturation', label: '彩度', min: -100, max: 100, step: 1, scale: .01 },
+    { key: 'highlightAmount', label: 'ハイライトカラー', grade: 'highlight' },
+    { key: 'shadowAmount', label: 'シャドウカラー', grade: 'shadow' },
+  ],
+  effect: [
+    { key: 'grain', label: '粒子の量', min: 0, max: 100, step: 1, scale: .0025 },
+    { key: 'grainSize', label: '粒子の大きさ', min: 50, max: 400, step: 1, scale: .01 },
+    { key: 'glow', label: '滲み', min: 0, max: 200, step: 1, scale: .01 },
+    { key: 'halation', label: 'ハレーション', min: 0, max: 60, step: 1, scale: .01 },
+    { key: 'vig', label: '周辺減光', min: 0, max: 600, step: 1, scale: .01 },
+    { key: 'fade', label: 'フェード', min: 0, max: 100, step: 1, scale: .005 },
+  ],
+};
+const GRADE_TARGETS = [
+  { key: 'highlight', label: 'ハイライト', resetHue: 45 },
+  { key: 'shadow', label: 'シャドウ', resetHue: 220 },
+];
+const MIDTONE_DETAIL_ROWS = [
+  { key: 'midtoneHue', label: '中間調 色相', min: 0, max: 360, step: 1, scale: 1, reset: 30 },
+  { key: 'midtoneSat', label: '中間調 彩度', min: 0, max: 100, step: 1, scale: .01 },
+  { key: 'midtoneAmount', label: '中間調 適用量', min: -100, max: 100, step: 1, scale: .01 },
+];
+// 効果 → 詳細（動き）／さらに詳細（質感）。旧「見た目」パネルにしか入口がなかった機能の置き場所（2026-09-02 ユーザー決定）。
+// 選択・切替は旧UIのチップ／セレクトを裏で押して、判定・履歴・保存の経路を1本のまま使う
+const MOTION_DETAIL_ROWS = [
+  { key: 'handheld', label: '手ブレ', min: 0, max: 100, step: 1, scale: .01 },
+  { key: 'leak', label: '感光', min: 0, max: 100, step: 1, scale: .01 },
+  { key: 'trans', label: 'つなぎ', min: 0, max: 100, step: 1, scale: .01 },
+  { key: 'judder', label: 'コマ落ち', min: 0, max: 100, step: 1, scale: .01, disabledWhen: () => project.adjust.effect === 2 && currentFilmProfile().fps > 0 },
+  { key: 'endDur', label: 'おわりの余韻', min: 0, max: 5, step: .1, scale: 1, digits: 1 },
+  { type: 'toggle', label: '自動そろえ', get: () => project.autoAlign !== false, set: v => { $('autoAlignChk').checked = v; $('autoAlignChk').onchange(); markDirty(); redraw(); } },
+];
+const TEXTURE_DETAIL_ROWS = [
+  { type: 'select', label: '質感モード', get: () => String(project.adjust.effect), options: () => [['0', '質感なし'], ['1', '青い記憶（滲み）'], ['2', '8mmホームムービー']],
+    set: v => document.querySelector(`#fxChips .chip[data-fx="${v}"]`)?.click() },
+  { type: 'select', label: 'フィルム種類', get: () => project.filmProfile, options: () => [...$('filmProfileSel').options].map(o => [o.value, o.textContent]),
+    disabledWhen: () => project.adjust.effect !== 2, set: v => { $('filmProfileSel').value = v; $('filmProfileSel').onchange(); } },
+  { type: 'select', label: '色（LUT）', get: () => project.lut,
+    options: () => [...document.querySelectorAll('#lutChips .chip')].filter(c => c.style.display !== 'none' || c.dataset.lut === project.lut).map(c => [c.dataset.lut, c.textContent]),
+    set: v => document.querySelector(`#lutChips .chip[data-lut="${v}"]`)?.click() },
+  { key: 'strength', label: '強さ', min: 0, max: 100, step: 1, scale: .01 },
+];
+const HSL_V2_KEYS = ['r', 'o', 'y', 'g', 'b', 'p'];
+const HSL_V2_LABELS = { r: '赤', o: '橙', y: '黄', g: '緑', b: '青', p: '紫' };
+
+function syncScreenAutoAmount() {
+  const input = $('screenAutoAmount'), output = $('screenAutoAmountValue');
+  if (!input || !output) return;
+  const percent = Math.round(autoAmountOf() * 100);
+  input.value = String(percent);
+  output.textContent = `${percent}%`;
+}
+function syncScreenMusicUi() {
+  const has = !!project.music;
+  const choose = $('musicBtn'), remove = $('musicRemoveBtn'), name = $('musicName');
+  if (choose) choose.textContent = has ? '差し替える' : '音楽を選ぶ';
+  if (remove) remove.disabled = !has;
+  if (name) name.textContent = has ? (project.music.name || '音楽') : '未選択';
+  const original = $('screenOriginalAudio');
+  if (original) original.checked = !project.muteAll;
+  const volume = $('musicVol');
+  if (volume) {
+    const value = Math.round((project.music?.volume ?? 0.7) * 100);
+    volume.value = String(value);
+    const out = volume.parentElement?.querySelector('output');
+    if (out) out.textContent = String(value);
+  }
+  syncMusicHint();
+}
+function screen03SheetOpen() {
+  return document.body.classList.contains('screen-music-open') || document.body.classList.contains('screen-export-open');
+}
+function showScreen03Ui() {
+  clearTimeout(screen03Timer);
+  document.body.classList.remove('screen03-ui-hidden');
+}
+function syncPlaybackButtons() {
+  const mark = playing ? '❚❚' : '▶';
+  if ($('screenPlayBtn')) $('screenPlayBtn').textContent = mark;
+  if ($('fullscreenPlay')) $('fullscreenPlay').textContent = mark;
+}
+function onPlaybackStarted() {
+  clearTimeout(screen03Timer);
+  if (document.body.classList.contains('ui-screen03')) document.body.classList.add('screen03-ui-hidden');
+  if (document.body.classList.contains('ui-fullscreen')) document.body.classList.add('fullscreen-ui-hidden');
+}
+function onPlaybackStopped(atEnd) {
+  if (document.body.classList.contains('ui-screen03')) {
+    clearTimeout(screen03Timer);
+    showScreen03Ui();
+  }
+  if (document.body.classList.contains('ui-fullscreen')) showFullscreenUi();
+}
+async function chooseBestPosterTime() {
+  const total = timelineDur();
+  if (!total) return 0;
+  const model = window.HikariPosterModel?.selectBestFrame;
+  if (typeof model === 'function') {
+    try {
+      const value = await Promise.race([
+        model({ duration: total, clips: project.clips.map((c, i) => ({ index: i, kind: c.kind, start: sumBefore(i), duration: clipLen(c) })) }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
+      ]);
+      if (Number.isFinite(value)) return clamp(value, 0, total);
+    } catch (_) { /* 端末モデルが無い・遅いときは下の決定的フォールバック */ }
+  }
+  const longest = project.clips.reduce((best, c, i) => clipLen(c) > best.len ? { i, len: clipLen(c) } : best, { i: 0, len: 0 });
+  return clamp(sumBefore(longest.i) + longest.len * .42, 0, total);
+}
+function syncScreenLook() {
+  $('screenLookName').textContent = PRESET_LABELS[project.preset] || '手動';
+  document.querySelectorAll('#screenLookCards [data-preset]').forEach(b => b.classList.toggle('on', b.dataset.preset === screenLookDraft));
+}
+// 作品を切り替えた・新規にした・空にした直後に、画面モードを作品の中身へ合わせる。
+// 素材があれば SCREEN 03、無ければ旧レイアウト（＋で素材を入れられる画面）へ戻す
+// 素材があれば SCREEN 03（現像中ならそのまま）、無ければ SCREEN 01 ホーム。旧エディタへは落とさない（2026-09-02 ユーザー決定）
+function syncScreenMode() {
+  if (project.clips.length) {
+    if (document.body.classList.contains('ui-editor-v2')) { seekTimeline(0); renderDevelopPanel(); }
+    else enterScreen03();
+  }
+  else enterHome();
+}
+const NEW_UI_CLASSES = ['ui-home', 'ui-confirm', 'ui-generating', 'ui-screen03', 'screen03-ui-hidden', 'screen-music-open', 'screen-export-open', 'ui-editor-v2', 'develop-active', 'clips-active', 'grading-view', 'look-overlay-open', 'ui-fullscreen', 'fullscreen-ui-hidden', 'develop-return-ready'];
+// ===== SCREEN 01 ホーム =====
+function enterHome() {
+  if (playing) stopPlayback();
+  if (saveStatus === 'dirty' && ready && project.id) { clearTimeout(saveTimer); void saveState(); }
+  clearTimeout(screen03Timer); screenLookDraft = null; screenLookCompareHeld = false; applyLutSelection(preview);
+  document.body.classList.remove(...NEW_UI_CLASSES);
+  restoreCurveHome();
+  document.body.classList.add('ui-home');
+  void renderHomeRecent();
+}
+function setHomeStatus(text) { const el = $('homeDropStatus'); if (el) el.textContent = text || ''; }
+async function renderHomeRecent() {
+  let metas = [];
+  try { metas = (await readAll('projectMeta')).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')); } catch (_) { }
+  metas.forEach(m => { if (m.thumb && !projectThumbs.has(m.id)) projectThumbs.set(m.id, m.thumb); });
+  const list = metas.filter(m => (m.duration || 0) > 0).slice(0, 6);
+  const host = $('homeRecent'); host.innerHTML = '';
+  $('homeRecentEmpty').hidden = list.length > 0;
+  list.forEach(m => {
+    const b = document.createElement('button'); b.className = 'homeCard'; b.setAttribute('aria-label', `${m.name} を開く`);
+    const th = document.createElement('div'); th.className = 'homeThumb';
+    const src = projectThumbs.get(m.id);
+    if (src) th.style.backgroundImage = `url(${src})`; else th.classList.add('th', `th-${PRESETS[m.preset] ? m.preset : 'hakumei'}`);
+    const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = m.name;
+    const ori = document.createElement('span'); ori.className = 'ori'; ori.textContent = ['9:16', '4:5'].includes(m.aspect) ? '縦' : '横';
+    b.append(th, nm, ori);
+    b.onclick = async () => { if (m.id === project.id) { if (project.clips.length) enterScreen03(); return; } await switchProject(m.id); };
+    host.appendChild(b);
+  });
+}
+// ===== SCREEN 02 選択確認 → 生成表示 =====
+let pendingHomeFiles = null;
+function showConfirm(files) {
+  if (importBusy) { setHomeStatus('素材を取り込み中です。終わってからもう一度追加してください'); return; }
+  const selection = splitImportFiles(files);
+  const accepted = [...selection.visuals, ...(selection.audio ? [selection.audio] : [])];
+  if (!accepted.length) return;
+  pendingHomeFiles = accepted;
+  $('confirmCount').textContent = importSelectionSummary(accepted);
+  const list = $('confirmList'); list.innerHTML = '';
+  accepted.forEach(f => {
+    const d = document.createElement('div');
+    const n = document.createElement('span'); n.textContent = f.name;
+    const s = document.createElement('small'); s.textContent = `${importKindLabel(importFileKind(f))}・${prettyBytes(f.size || 0)}`;
+    d.append(n, s); list.appendChild(d);
+  });
+  $('confirmWarning').textContent = importSelectionWarning(selection);
+  document.body.classList.add('ui-confirm');
+}
+$('homePickBtn').onclick = () => { if (importBusy) setHomeStatus('素材を取り込み中です。終わってからもう一度追加してください'); else $('fileInput').click(); };
+$('homeMoreBtn').onclick = async () => { $('projectSheet').classList.add('on'); await updateProjectSheet(); };
+$('confirmCancel').onclick = () => { pendingHomeFiles = null; document.body.classList.remove('ui-confirm'); };
+$('confirmStart').onclick = async () => {
+  if (importBusy) { setHomeStatus('素材を取り込み中です。終わってからもう一度追加してください'); return; }
+  const files = pendingHomeFiles; if (!files?.length) return; pendingHomeFiles = null;
+  importBusy = true;
+  document.body.classList.remove('ui-confirm'); document.body.classList.add('ui-generating');
+  let importedVisual = false;
+  try {
+    // ホームから選んだ素材は必ず新しい作品にする。確認中のキャンセルで空作品を残さないよう、作成はaddFilesの最後まで遅らせる。
+    const selection = splitImportFiles(files);
+    const result = await addFiles(selection.visuals, null, { newProject: true, fromHome: true });
+    importedVisual = result.successCount > 0;
+    // 音楽は視覚素材が1本でも成功した後だけ、新規作品へ適用する。
+    if (selection.audio && result.successCount > 0) await 音楽を入れる(selection.audio);
+    else if (selection.audio && !result.successCount && !result.cancelled) setHomeStatus('音楽だけでは作品を作れません。動画または写真を追加してください');
+  } catch (e) { logErr('取り込み: ' + e.message); }
+  finally {
+    importBusy = false;
+    document.body.classList.remove('ui-generating');
+    // 成功時はaddFilesがSCREEN 03へ進める。キャンセル・全失敗では、旧作品を復元してもHomeへ戻す。
+    if (!importedVisual) enterHome();
+  }
+};
+// ホーム「このごろ」のサムネイル。ポスター位置の絵を Look 込みで描き、projectMeta へ保存する
+async function captureProjectThumb() {
+  if (!project.id || !project.clips.length || thumbBusy || exporting) return;
+  const timing = getTimelineRenderTiming(clamp(project.posterTime || 0, 0, timelineDur()));
+  if (!timing || !clipReady(timing.clip)) return;
+  thumbBusy = true;
+  try {
+    const pipe = ensureThumbPipe();
+    if (timing.clip.kind === 'video' && Math.abs(timing.clip.video.currentTime - timing.localSourceTime) > 0.001) await seekTo(timing.clip.video, timing.localSourceTime);
+    applyLutSelection(pipe);
+    await pipe.draw(clipSource(timing.clip), timing.clip.w, timing.clip.h, 0, timing.effectTime, timing.clip, { adjust: { ...project.adjust, letterbox: false }, fit: 'cover' });
+    const out = document.createElement('canvas'); out.width = out.height = THUMB_PX;
+    out.getContext('2d').drawImage(pipe.cv, 0, 0, THUMB_PX, THUMB_PX);
+    projectThumbs.set(project.id, out.toDataURL('image/jpeg', .72));
+    scheduleSave();
+  } catch (_) { /* サムネイルの失敗で編集を止めない */ }
+  finally { thumbBusy = false; }
+}
+function enterScreen03({ keepPosition = false } = {}) {
+  if (!project.clips.length) return;
+  const preservedPosition = clamp(screen03ReturnPosition ?? timelinePos, 0, timelineDur());
+  screen03ReturnPosition = null;
+  if (playing) stopPlayback();
+  document.body.classList.remove(...NEW_UI_CLASSES);
+  document.body.classList.add('ui-screen03');
+  screenLookDraft = null; screenLookCompareHeld = false; applyLutSelection(preview);
+  screenRandomizeUndoSeed = null;
+  const openingTime = keepPosition ? preservedPosition : clamp(project.posterTime || 0, 0, timelineDur());
+  trace('screen03.enter', () => ({ keepPosition, T: +openingTime.toFixed(3), upload: preview.uploadMode, quality: preview.qualityPath }));
+  seekTimeline(openingTime);
+  clearTimeout(projectThumbTimer); projectThumbTimer = setTimeout(() => void captureProjectThumb(), 500);
+  syncScreenLook(); syncScreenAutoAmount(); syncScreenMusicUi(); syncPlaybackButtons(); updateTimeLabel(); showScreen03Ui();
+}
+function enterDevelopEditor() {
+  clearTimeout(screen03Timer);
+  screen03ReturnPosition = clamp(timelinePos, 0, timelineDur());
+  screenLookDraft = null; screenLookCompareHeld = false; applyLutSelection(preview);
+  document.body.classList.remove(...NEW_UI_CLASSES);
+  document.body.classList.add('ui-editor-v2', 'develop-active');
+  developCategory = 'light'; developDetail = null;
+  switchTab('color', true); renderDevelopPanel(); redraw();
+}
+function closeScreen03Sheet() {
+  document.body.classList.remove('screen-music-open', 'screen-export-open');
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('on'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('on'));
+  document.body.classList.remove('develop-active', 'clips-active');
+  showScreen03Ui();
+}
+async function openScreenMusicSheet() {
+  if (!project.clips.length) return;
+  document.body.classList.remove('screen-export-open');
+  document.body.classList.add('screen-music-open');
+  switchTab('music', true);
+  showScreen03Ui(false);
+  try { await ensureMusicBuffer(); } catch (e) { logErr('音楽: ' + e.message); }
+  syncScreenMusicUi();
+}
+function openScreenExportSheet() {
+  if (!project.clips.length) return;
+  document.body.classList.remove('screen-music-open');
+  document.body.classList.add('screen-export-open');
+  switchTab('export', true);
+  showScreen03Ui(false);
+  updateDurationUI(); updateExportSummary();
+}
+function openLookOverlay() {
+  screenLookDraft = project.preset || null; screenLookCompareHeld = false;
+  document.body.classList.add('look-overlay-open');
+  document.body.classList.remove('screen03-ui-hidden');
+  syncScreenLook(); scheduleThumbs();
+}
+function closeLookOverlay(restore = true) {
+  screenLookDraft = null; screenLookCompareHeld = false;
+  document.body.classList.remove('look-overlay-open');
+  if (restore) { applyLutSelection(preview); redraw(); }
+  syncScreenLook(); showScreen03Ui();
+}
+function showFullscreenUi() {
+  clearTimeout(fullscreenTimer);
+  document.body.classList.remove('fullscreen-ui-hidden');
+  fullscreenTimer = setTimeout(() => document.body.classList.add('fullscreen-ui-hidden'), 2500);
+}
+async function enterFullscreenView() {
+  clearTimeout(screen03Timer);
+  document.body.classList.add('ui-fullscreen', 'fullscreen-ui-hidden');
+  try { await $('previewWrap').requestFullscreen?.(); } catch (_) { }
+  try { await screen.orientation?.lock?.('landscape'); } catch (_) { }
+}
+async function leaveFullscreenView() {
+  try { if (document.fullscreenElement) await document.exitFullscreen(); } catch (_) { }
+  try { screen.orientation?.unlock?.(); } catch (_) { }
+  document.body.classList.remove('ui-fullscreen', 'fullscreen-ui-hidden');
+  showScreen03Ui();
+}
+
+$('screenPlayBtn').onclick = e => { e.stopPropagation(); playing ? stopPlayback() : play(); };
+$('fullscreenPlay').onclick = e => { e.stopPropagation(); playing ? stopPlayback() : play(); };
+$('developPreviewBack').onclick = () => enterScreen03({ keepPosition: true });
+$('developEnterBtn').onclick = enterDevelopEditor;
+$('lookChangeBtn').onclick = openLookOverlay;
+$('screenMusicBtn').onclick = e => { e.stopPropagation(); void openScreenMusicSheet(); };
+$('screenExportBtn').onclick = e => { e.stopPropagation(); openScreenExportSheet(); };
+$('screenMusicClose').onclick = e => { e.stopPropagation(); closeScreen03Sheet(); };
+$('screenExportClose').onclick = e => { e.stopPropagation(); closeScreen03Sheet(); };
+$('lookCancelBtn').onclick = () => closeLookOverlay(true);
+$('lookApplyBtn').onclick = () => {
+  if (!screenLookDraft) return;
+  const chosen = screenLookDraft;
+  screenLookDraft = null; screenLookCompareHeld = false;
+  applyLutSelection(preview);
+  if (applyPreset(chosen, { silent: true, lookOnly: true }) !== false) closeLookOverlay(false);
+};
+// range共通の履歴境界（末尾のhistoryGesture）を使うので、SCREEN 03だけ二重に積まない。
+$('screenAutoAmount').oninput = e => {
+  const percent = clamp(Number(e.target.value), 0, 100);
+  project.autoAmount = percent / 100;
+  $('screenAutoAmountValue').textContent = `${Math.round(percent)}%`;
+  redraw(); markDirty();
+};
+$('screenRandomizeBtn').onclick = e => {
+  e.stopPropagation();
+  if (!project.clips.length) return;
+  screenRandomizeUndoSeed = normalizeTextureSeed(project.textureSeed, project);
+  reseedProject(); updateHistoryUI(); showScreen03Ui();
+};
+$('screenUndoBtn').onclick = e => {
+  e.stopPropagation();
+  if (screenRandomizeUndoSeed === null || operationBusy) return;
+  project.textureSeed = screenRandomizeUndoSeed; screenRandomizeUndoSeed = null;
+  transPlanCache = null; renderTimeline(); markDirty(); redraw(); scheduleSave(); updateHistoryUI(); showScreen03Ui();
+};
+// シークは見る位置を動かすだけ。ポスター（posterTime）は「フレーム変更」だけが差し替える（UI設計正本 §6）
+$('screenSeek').oninput = e => { if (playing) stopPlayback(); seekTimeline(Number(e.target.value)); showScreen03Ui(); };
+$('frameChangeBtn').onclick = e => {
+  e.stopPropagation(); if (!project.clips.length) return;
+  const before = beginHistory(), points = [.12, .30, .50, .70, .88].map(f => timelineDur() * f);
+  const next = points.find(t => t > timelinePos + .05) ?? points[0];
+  project.posterTime = next; seekTimeline(next); commitHistory(before); markDirty(); showScreen03Ui();
+};
+$('fullscreenBtn').onclick = e => { e.stopPropagation(); enterFullscreenView(); };
+// 暫定: SCREEN 01（ホーム・このごろ）ができるまで、作品一覧・新規作品へはここから入る
+$('screenProjectsBtn').onclick = e => { e.stopPropagation(); enterHome(); };
+// 明示の保存（自動保存は続くが、「保存した」と分かる操作を置く・2026-09-02 ユーザー要望）
+$('screenSaveBtn').onclick = async e => { e.stopPropagation(); clearTimeout(screen03Timer); clearTimeout(saveTimer); await saveState(); showScreen03Ui(); };
+$('screenOriginalAudio').onchange = () => {
+  project.muteAll = !$('screenOriginalAudio').checked;
+  $('muteAllChk').checked = project.muteAll;
+  project.clips.forEach(c => { if (c.kind === 'video') c.video.muted = project.muteAll || c.muted; });
+  renderTimeline(); renderClipEdit(); syncScreenMusicUi();
+  markDirty();
+};
+$('musicRemoveBtn').onclick = () => {
+  if (!project.music || exporting) return;
+  const before = beginHistory();
+  stopMusic(); stopWaveAudition();
+  project.music = null; musicAudioBuf = null;
+  renderTimeline(); syncScreenMusicUi();
+  commitHistory(before); markDirty();
+  redraw();
+};
+// 端末が画面を裏に回した瞬間に未保存分を書き切る（Androidはタブごと落とすことがある）
+document.addEventListener('visibilitychange', () => { if (document.hidden && saveStatus === 'dirty' && ready && project.id) { clearTimeout(saveTimer); void saveState(); } });
+$('fullscreenBack').onclick = e => { e.stopPropagation(); leaveFullscreenView(); };
+$('fullscreenControls').onclick = e => { if (e.target === $('fullscreenControls')) showFullscreenUi(); };
+// 薄く隠れたSCREEN 03の最初のタップは、pointerup時点でUIだけを戻す。
+// 続くclickで再生へ進まないよう、短いガードを置く（タップ1回=再表示だけの契約）。
+$('previewBox').addEventListener('pointerup', e => {
+  if (!document.body.classList.contains('ui-screen03') || !document.body.classList.contains('screen03-ui-hidden') || playing) return;
+  if (e.target.closest('button,input') || exporting || !project.clips.length) return;
+  screen03WakeUntil = performance.now() + 450;
+  showScreen03Ui();
+});
+// 映像のタップ＝再生／停止（2026-09-02 ユーザー要望）。SCREEN 03 では停止時にUIを再表示し、再生時はUIを消す（既存の再生経路）。
+// 現像画面でも同じ。ただし文字の上を押したときと文字タブでの操作は、文字のつかみ移動を優先する
+$('previewBox').addEventListener('click', e => {
+  if (document.body.classList.contains('ui-fullscreen')) { if (!e.target.closest('button,input')) showFullscreenUi(); return; }
+  if (e.target.closest('button,input') || exporting || !project.clips.length) return;
+  if (document.body.classList.contains('ui-screen03')) {
+    if (performance.now() < screen03WakeUntil) return;
+    if (playing) stopPlayback();
+    else if (document.body.classList.contains('screen03-ui-hidden')) showScreen03Ui();
+    else play();
+    return;
+  }
+  if (document.body.classList.contains('ui-editor-v2')) {
+    if ($('panel-text').classList.contains('on') || textAtPoint(e) || performance.now() - previewGestureEnd < 500) return;
+    if (playing) stopPlayback(); else play();
+  }
+});
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && document.body.classList.contains('ui-fullscreen')) leaveFullscreenView(); });
+
+document.querySelectorAll('#screenLookCards .lookCard').forEach(card => {
+  let timer = 0, held = false, suppressClick = false, startX = 0, startY = 0;
+  card.addEventListener('pointerdown', e => {
+    held = false; suppressClick = false; startX = e.clientX; startY = e.clientY; clearTimeout(timer);
+    timer = setTimeout(() => { held = true; suppressClick = true; screenLookCompareHeld = true; redraw(); }, 450);
+    try { card.setPointerCapture(e.pointerId); } catch (_) { }
+  });
+  card.addEventListener('pointermove', e => { if (Math.hypot(e.clientX - startX, e.clientY - startY) > 10 && !held) clearTimeout(timer); });
+  const end = e => {
+    clearTimeout(timer);
+    try { card.releasePointerCapture(e.pointerId); } catch (_) { }
+    if (held) { screenLookCompareHeld = false; held = false; redraw(); }
+  };
+  card.addEventListener('pointerup', end); card.addEventListener('pointercancel', end);
+  card.addEventListener('click', () => { if (suppressClick) { suppressClick = false; return; } screenLookDraft = card.dataset.preset; screenLookCompareHeld = false; syncScreenLook(); redraw(); });
+});
+
+function developUiValue(row) { return (Number(project.adjust[row.key]) || 0) / row.scale; }
+function setDevelopValue(row, uiValue) {
+  const v = clamp(Number(uiValue), row.min, row.max);
+  project.adjust[row.key] = v * row.scale;
+  markDirty(); redraw();
+  return v;
+}
+function temperatureToKelvin(value) {
+  const t = clamp(Number(value) || 0, -1, 1);
+  return Math.round(t < 0 ? 6500 + t * 4000 : 6500 + t * 3500);
+}
+function kelvinToTemperature(value) {
+  const k = clamp(Number(value) || 6500, 2500, 10000);
+  return k < 6500 ? (k - 6500) / 4000 : (k - 6500) / 3500;
+}
+function gradeColorCss(target) {
+  const hue = Number(project.adjust[`${target}Hue`]) || 0;
+  const sat = clamp(Number(project.adjust[`${target}Sat`]) || 0, 0, 1);
+  return `hsl(${hue}, ${Math.round(sat * 100)}%, ${sat < .01 ? 88 : 50}%)`;
+}
+function fineBounds(row, value) {
+  if (!developFine) return [row.min, row.max];
+  const span = (row.max - row.min) * .12;
+  let min = Math.max(row.min, value - span / 2), max = Math.min(row.max, value + span / 2);
+  if (max - min < span) { if (min === row.min) max = Math.min(row.max, min + span); else min = Math.max(row.min, max - span); }
+  return [min, max];
+}
+function createDevelopRows(rows) {
+  const wrap = document.createElement('div'); wrap.className = 'developRows';
+  if (rows.length < 6) wrap.style.gridTemplateRows = `repeat(${Math.max(1, rows.length)},minmax(32px,1fr))`;
+  rows.forEach(row => {
+    const line = document.createElement('div'); line.className = 'developRow';
+    const label = document.createElement('label'); label.textContent = row.label;
+    if (row.type === 'select') {
+      const sel = document.createElement('select'); sel.className = 'developSelect'; sel.setAttribute('aria-label', row.label);
+      row.options().forEach(([value, text]) => { const o = document.createElement('option'); o.value = value; o.textContent = text; sel.appendChild(o); });
+      sel.value = row.get(); sel.disabled = !!row.disabledWhen?.();
+      sel.onchange = () => { row.set(sel.value); renderDevelopPanel(); };
+      line.append(label, sel); wrap.appendChild(line); return;
+    }
+    if (row.type === 'toggle') {
+      const on = !!row.get(), tg = document.createElement('button'); tg.type = 'button'; tg.className = 'developToggle' + (on ? ' on' : '');
+      tg.textContent = on ? 'オン' : 'オフ'; tg.setAttribute('aria-pressed', String(on)); tg.setAttribute('aria-label', row.label);
+      tg.onclick = () => { row.set(!on); renderDevelopPanel(); };
+      line.append(label, tg); wrap.appendChild(line); return;
+    }
+    if (row.grade) {
+      const hue = Math.round(Number(project.adjust[`${row.grade}Hue`]) || 0);
+      const sat = Math.round((Number(project.adjust[`${row.grade}Sat`]) || 0) * 100);
+      const amount = Math.round((Number(project.adjust[`${row.grade}Amount`]) || 0) * 100);
+      const entry = document.createElement('button'); entry.type = 'button'; entry.className = 'developGradeEntry';
+      entry.setAttribute('aria-label', `${row.label}をカラーホイールで調整`);
+      entry.innerHTML = `<i style="background:${gradeColorCss(row.grade)}"></i><small>色相 ${hue}°・彩度 ${sat}・適用 ${amount}</small><b>›</b>`;
+      entry.onclick = () => { developGradeTarget = row.grade; developDetail = 'grading'; renderDevelopPanel(); };
+      line.append(label, entry); wrap.appendChild(line); return;
+    }
+    const range = document.createElement('input'); range.type = 'range';
+    const current = developUiValue(row), [min, max] = fineBounds(row, current);
+    range.min = String(min); range.max = String(max); range.step = String(developFine ? row.step / 5 : row.step); range.value = String(current);
+    const number = document.createElement('input'); number.type = 'number'; number.className = 'developNumber';
+    if (row.kelvin) {
+      number.min = '2500'; number.max = '10000'; number.step = '50'; number.value = String(temperatureToKelvin(project.adjust[row.key]));
+      number.setAttribute('aria-label', '色温度（ケルビン）');
+    } else {
+      number.min = String(row.min); number.max = String(row.max); number.step = String(row.step);
+      number.value = row.digits ? current.toFixed(row.digits) : Math.round(current).toString();
+    }
+    if (row.disabledWhen?.()) { range.disabled = true; number.disabled = true; line.style.opacity = '.5'; }
+    range.setAttribute('aria-label', row.kelvin ? '色温度' : row.label);
+    range.setAttribute('aria-valuetext', row.kelvin ? `${temperatureToKelvin(project.adjust[row.key])} K` : String(current));
+    range.oninput = () => {
+      const v = setDevelopValue(row, range.value);
+      if (row.kelvin) {
+        number.value = String(temperatureToKelvin(project.adjust[row.key]));
+        range.setAttribute('aria-valuetext', `${number.value} K`);
+      } else number.value = row.digits ? v.toFixed(row.digits) : Math.round(v).toString();
+    };
+    let directBefore = null;
+    number.onfocus = () => { directBefore = beginHistory(); };
+    const setDirect = () => {
+      if (row.kelvin) {
+        const k = clamp(Number(number.value) || 6500, 2500, 10000);
+        project.adjust[row.key] = kelvinToTemperature(k); range.value = String(project.adjust[row.key] * 100);
+        range.setAttribute('aria-valuetext', `${Math.round(k)} K`); markDirty(); redraw();
+      } else {
+        const v = setDevelopValue(row, number.value === '' ? 0 : number.value); range.value = String(v);
+      }
+    };
+    // ケルビンは桁を打つ途中の値（7→2500K）を当てないよう、確定（change＝Enter・フォーカス外れ）だけで反映する
+    if (row.kelvin) number.onchange = setDirect;
+    else { number.oninput = setDirect; number.onchange = setDirect; }
+    number.onblur = () => { if (directBefore) commitHistory(directBefore); directBefore = null; renderDevelopPanel(); };
+    const reset = () => { const before = beginHistory(); project.adjust[row.key] = (row.reset ?? 0) * row.scale; commitHistory(before); markDirty(); redraw(); renderDevelopPanel(); };
+    number.ondblclick = reset;
+    let lastTap = 0;
+    number.addEventListener('pointerup', () => { const now = performance.now(); if (now - lastTap < 360) reset(); lastTap = now; });
+    if (row.kelvin) {
+      const withUnit = document.createElement('div'); withUnit.className = 'developNumberWithUnit';
+      const unit = document.createElement('span'); unit.textContent = 'K'; withUnit.append(number, unit);
+      line.append(label, range, withUnit);
+    } else line.append(label, range, number);
+    wrap.appendChild(line);
+  });
+  return wrap;
+}
+function renderDevelopHsl() {
+  const body = $('developBody'), colors = document.createElement('div'); colors.className = 'developHslColors';
+  HSL_V2_KEYS.forEach(k => {
+    const b = document.createElement('button'); b.className = 'developHslColor' + (hslCh === k ? ' on' : '');
+    b.innerHTML = `<i style="background:${HSL_COLORS[k]}"></i>${HSL_V2_LABELS[k]}`; b.onclick = () => { hslCh = k; renderDevelopPanel(); };
+    colors.appendChild(b);
+  });
+  body.appendChild(colors);
+  const rows = [
+    { axis: 'h', label: '色相' }, { axis: 's', label: '彩度' }, { axis: 'l', label: '輝度' },
+  ].map(x => ({ key: `__hsl_${x.axis}`, label: x.label, min: -100, max: 100, step: 1, scale: 1, axis: x.axis }));
+  const wrap = document.createElement('div'); wrap.className = 'developRows'; wrap.style.gridTemplateRows = 'repeat(3,minmax(38px,1fr))';
+  rows.forEach(row => {
+    const cur = hslOf(project.adjust)[hslCh]?.[row.axis] || 0, line = document.createElement('div'); line.className = 'developRow';
+    const label = document.createElement('label'); label.textContent = row.label;
+    const range = document.createElement('input'); range.type = 'range'; const [min,max] = fineBounds(row, cur); range.min=min; range.max=max; range.step=developFine ? .2 : 1; range.value=cur;
+    const number = document.createElement('input'); number.type='number'; number.className='developNumber'; number.min=-100; number.max=100; number.value=cur;
+    const set = value => { const beforeVal = clamp(Number(value),-100,100), all=normalizeHsl(project.adjust.hsl); all[hslCh][row.axis]=beforeVal; project.adjust.hsl=all; range.value=beforeVal; number.value=beforeVal; markDirty(); redraw(); };
+    range.oninput=()=>set(range.value); let directBefore=null; number.onfocus=()=>{directBefore=beginHistory();};
+    number.oninput=()=>set(number.value===''?0:number.value); number.onchange=()=>set(number.value===''?0:number.value);
+    number.onblur=()=>{if(directBefore)commitHistory(directBefore);directBefore=null;}; number.ondblclick=()=>{ const before=beginHistory(); set(0); commitHistory(before); };
+    line.append(label,range,number); wrap.appendChild(line);
+  });
+  body.appendChild(wrap);
+}
+function renderDevelopGrade() {
+  const body = $('developBody'), view = document.createElement('div'); view.className = 'developGradeView';
+  const carousel = document.createElement('div'); carousel.className = 'developGradeCarousel';
+  const track = document.createElement('div'); track.className = 'developGradeTrack'; carousel.appendChild(track);
+  const dots = document.createElement('div'); dots.className = 'developGradeDots';
+  // 適用量はページの外（全幅）。切替に追従して、いま見ている対象の値を出す
+  const amountRow = document.createElement('div'); amountRow.className = 'developGradeAmountRow';
+  const amountLabel = document.createElement('label'); amountLabel.textContent = '適用量';
+  const amountRange = document.createElement('input'); amountRange.type = 'range'; amountRange.min = '-100'; amountRange.max = '100'; amountRange.step = developFine ? '.2' : '1';
+  const amountNumber = document.createElement('input'); amountNumber.type = 'number'; amountNumber.className = 'developNumber'; amountNumber.min = '-100'; amountNumber.max = '100'; amountNumber.step = '1';
+  amountRow.append(amountLabel, amountRange, amountNumber);
+  const syncAmount = () => {
+    const amount = clamp(Number(project.adjust[`${developGradeTarget}Amount`]) || 0, -1, 1);
+    amountRange.value = String(amount * 100); amountNumber.value = String(Math.round(amount * 100));
+    amountRange.setAttribute('aria-label', `${GRADE_TARGETS.find(x => x.key === developGradeTarget)?.label || ''}の適用量`);
+  };
+  const syncPage = target => {
+    developGradeTarget = target;
+    const index = GRADE_TARGETS.findIndex(x => x.key === target);
+    track.querySelectorAll('.developGradePage').forEach(page => page.classList.toggle('on', page.dataset.grade === target));
+    track.style.transform = index === 0 ? 'translateX(0)' : 'translateX(calc(0px - var(--grade-page-w) - 18px))';
+    dots.innerHTML = GRADE_TARGETS.map((_, i) => i === index ? '<b>•</b>' : '•').join('');
+    syncAmount();
+  };
+  GRADE_TARGETS.forEach(target => {
+    const page = document.createElement('section'); page.className = 'developGradePage'; page.dataset.grade = target.key;
+    // 題名・色相・彩度を1行に畳む（縦の余白をホイールへ回す）
+    const titleRow = document.createElement('div'); titleRow.className = 'developGradeTitleRow';
+    const title = document.createElement('b'); title.textContent = target.label;
+    const hueLabel = document.createElement('label'); hueLabel.append('色相');
+    const hueNumber = document.createElement('input'); hueNumber.type = 'number'; hueNumber.min = '0'; hueNumber.max = '360'; hueNumber.step = '1';
+    const hueUnit = document.createElement('span'); hueUnit.textContent = '°'; hueLabel.append(hueNumber, hueUnit);
+    const satLabel = document.createElement('label'); satLabel.append('彩度');
+    const satNumber = document.createElement('input'); satNumber.type = 'number'; satNumber.min = '0'; satNumber.max = '100'; satNumber.step = '1'; satLabel.append(satNumber);
+    titleRow.append(title, hueLabel, satLabel);
+    const wheel = document.createElement('div'); wheel.className = 'developGradeWheel';
+    wheel.setAttribute('role', 'slider'); wheel.setAttribute('aria-label', `${target.label}の色相と彩度`);
+    const point = document.createElement('i'); point.className = 'developGradePoint'; wheel.appendChild(point);
+    page.append(titleRow, wheel); track.appendChild(page);
+
+    const syncValues = () => {
+      const hue = (Number(project.adjust[`${target.key}Hue`]) || 0) % 360;
+      const sat = clamp(Number(project.adjust[`${target.key}Sat`]) || 0, 0, 1);
+      const angle = (hue - 90) * Math.PI / 180, radius = 50 * sat;
+      point.style.left = `${50 + Math.cos(angle) * radius}%`; point.style.top = `${50 + Math.sin(angle) * radius}%`;
+      point.style.background = gradeColorCss(target.key);
+      hueNumber.value = String(Math.round(hue)); satNumber.value = String(Math.round(sat * 100));
+      wheel.setAttribute('aria-valuetext', `色相 ${Math.round(hue)}度、彩度 ${Math.round(sat * 100)}`);
+      if (developGradeTarget === target.key) syncAmount();
+    };
+    const setColor = (hue, sat) => {
+      project.adjust[`${target.key}Hue`] = (Number(hue) + 360) % 360;
+      project.adjust[`${target.key}Sat`] = clamp(Number(sat), 0, 1);
+      markDirty(); redraw(); syncValues();
+    };
+    // 点の位置（ホイール中心からのpx）から色相・彩度を決める。中心から外へはみ出しても円周で止める
+    const setFromOffset = (dx, dy, radius) => {
+      const length = Math.min(radius, Math.hypot(dx, dy));
+      const hue = (Math.atan2(dy, dx) * 180 / Math.PI + 90 + 360) % 360;
+      setColor(hue, length / radius);
+    };
+    // ドラッグは「いまの点からの相対移動」。指の動きの6割（微調整中は2割）だけ点が動くので、
+    // 指の下に点が隠れず、ホイールの外まで指を滑らせても効く。動かさずに離したときだけ、その場所へ絶対指定する（2026-09-02 ユーザー決定）
+    let gestureBefore = null, startPointer = null, startPoint = null, moved = false, radiusPx = 0;
+    wheel.onpointerdown = e => {
+      e.stopPropagation(); gestureBefore = beginHistory(); moved = false;
+      const rect = wheel.getBoundingClientRect(); radiusPx = rect.width / 2;
+      const hue = (Number(project.adjust[`${target.key}Hue`]) || 0) * Math.PI / 180;
+      const sat = clamp(Number(project.adjust[`${target.key}Sat`]) || 0, 0, 1);
+      startPointer = { x: e.clientX, y: e.clientY };
+      startPoint = { x: Math.sin(hue) * radiusPx * sat, y: -Math.cos(hue) * radiusPx * sat };
+      try { wheel.setPointerCapture(e.pointerId); } catch (_) { }
+    };
+    wheel.onpointermove = e => {
+      if (!gestureBefore || !startPointer) return;
+      const mx = e.clientX - startPointer.x, my = e.clientY - startPointer.y;
+      if (!moved && Math.hypot(mx, my) < 6) return;
+      moved = true;
+      const gain = developFine ? 0.2 : 0.6;
+      setFromOffset(startPoint.x + mx * gain, startPoint.y + my * gain, radiusPx);
+    };
+    const finishWheel = e => {
+      if (!gestureBefore) return;
+      try { wheel.releasePointerCapture(e.pointerId); } catch (_) { }
+      if (!moved && e.type === 'pointerup') {
+        const rect = wheel.getBoundingClientRect();
+        setFromOffset(e.clientX - rect.left - radiusPx, e.clientY - rect.top - radiusPx, radiusPx);
+      }
+      commitHistory(gestureBefore); gestureBefore = null; startPointer = null; startPoint = null; moved = false;
+    };
+    wheel.onpointerup = finishWheel; wheel.onpointercancel = finishWheel;
+
+    let directBefore = null;
+    const directColor = () => setColor(clamp(Number(hueNumber.value) || 0, 0, 360), clamp(Number(satNumber.value) || 0, 0, 100) / 100);
+    [hueNumber, satNumber].forEach(input => {
+      input.onfocus = () => { directBefore ||= beginHistory(); };
+      input.oninput = directColor; input.onchange = directColor;
+      input.onblur = () => { if (directBefore) commitHistory(directBefore); directBefore = null; syncValues(); };
+    });
+    hueNumber.ondblclick = () => { const before = beginHistory(); setColor(target.resetHue, project.adjust[`${target.key}Sat`] || 0); commitHistory(before); };
+    satNumber.ondblclick = () => { const before = beginHistory(); setColor(project.adjust[`${target.key}Hue`] || target.resetHue, 0); commitHistory(before); };
+    syncValues();
+  });
+  amountRange.oninput = () => {
+    project.adjust[`${developGradeTarget}Amount`] = clamp(Number(amountRange.value), -100, 100) / 100;
+    amountNumber.value = String(Math.round(Number(amountRange.value))); markDirty(); redraw();
+  };
+  let amountBefore = null;
+  amountNumber.onfocus = () => { amountBefore = beginHistory(); };
+  const setAmount = () => {
+    const v = clamp(Number(amountNumber.value) || 0, -100, 100); project.adjust[`${developGradeTarget}Amount`] = v / 100;
+    amountRange.value = String(v); markDirty(); redraw();
+  };
+  amountNumber.oninput = setAmount; amountNumber.onchange = setAmount;
+  amountNumber.onblur = () => { if (amountBefore) commitHistory(amountBefore); amountBefore = null; syncAmount(); };
+  amountNumber.ondblclick = () => { const before = beginHistory(); project.adjust[`${developGradeTarget}Amount`] = 0; markDirty(); redraw(); syncAmount(); commitHistory(before); };
+  let swipeStart = null;
+  carousel.onpointerdown = e => {
+    if (e.target.closest('.developGradeWheel,input,button')) return;
+    swipeStart = { x: e.clientX, y: e.clientY };
+    try { carousel.setPointerCapture(e.pointerId); } catch (_) { }
+  };
+  const finishSwipe = e => {
+    if (!swipeStart) return;
+    const dx = e.clientX - swipeStart.x, dy = e.clientY - swipeStart.y;
+    if (Math.abs(dx) > 44 && Math.abs(dx) > Math.abs(dy)) {
+      const current = GRADE_TARGETS.findIndex(x => x.key === developGradeTarget);
+      const next = clamp(current + (dx < 0 ? 1 : -1), 0, GRADE_TARGETS.length - 1);
+      syncPage(GRADE_TARGETS[next].key);
+    }
+    swipeStart = null;
+  };
+  carousel.onpointerup = finishSwipe; carousel.onpointercancel = () => { swipeStart = null; };
+  view.append(carousel, dots, amountRow); body.appendChild(view); syncPage(developGradeTarget);
+}
+function restoreCurveHome() { if ($('curveSvg').parentElement !== curveOriginalParent) curveOriginalParent.appendChild($('curveSvg')); }
+function renderDevelopPanel() {
+  if (!document.body.classList.contains('ui-editor-v2')) return;
+  const categories = $('developCategories'); categories.innerHTML = '';
+  DEVELOP_CATEGORIES.forEach(c => { const b=document.createElement('button'); b.className='developCat'+(c.key===developCategory?' on':''); b.innerHTML=`<span class="ic">${c.icon}</span>${c.label}`; b.onclick=()=>{ developCategory=c.key; developDetail=null; renderDevelopPanel(); }; categories.appendChild(b); });
+  const body=$('developBody'), back=$('developBack'), detail=$('developDetailBtn');
+  // カーブは既存UIのSVGを借りている。現像パネルを空にする前に元の親へ戻さないと、
+  // カーブから他カテゴリへ移った瞬間にSVGごと破棄され、以後のパネル描画が止まる。
+  restoreCurveHome();
+  body.innerHTML='';
+  // 詳細を開いていないときは、左の枠で SCREEN 03（完成を見る画面）へ戻れるようにする
+  document.body.classList.toggle('develop-return-ready', !developDetail);
+  back.hidden=!developDetail;
+  if (!developDetail) { back.onclick=null; }
+  else {
+    back.textContent=developDetail==='midtone'?'← カラーグレーディング':developDetail==='texture'?'← 動き':`← ${DEVELOP_CATEGORIES.find(c=>c.key===developCategory)?.label||''}`;
+    back.onclick=()=>{ developDetail=developDetail==='midtone'?'grading':developDetail==='texture'?'motion':null; renderDevelopPanel(); };
+  }
+  $('fineTuneBtn').classList.toggle('on',developFine); $('fineTuneBtn').textContent=developFine?'微調整中':'微調整';
+  // ホイール表示中だけカテゴリ行を隠す（その分ホイールを大きくする）
+  document.body.classList.toggle('grading-view', developDetail === 'grading' && developCategory === 'color');
+  if (developDetail === 'grading' && developCategory === 'color') renderDevelopGrade();
+  else if (developDetail === 'midtone') body.appendChild(createDevelopRows(MIDTONE_DETAIL_ROWS));
+  else if (developDetail === 'motion') body.appendChild(createDevelopRows(MOTION_DETAIL_ROWS));
+  else if (developDetail === 'texture') body.appendChild(createDevelopRows(TEXTURE_DETAIL_ROWS));
+  else if (developDetail) { const note=document.createElement('p'); note.className='developOpenNote'; note.textContent='このカテゴリの詳細項目はUI設計正本で未確定です。現在の機能は削除せず保持しています。'; body.appendChild(note); }
+  else if (developCategory === 'hsl') renderDevelopHsl();
+  else if (developCategory === 'curve') { const host=document.createElement('div'); host.id='developCurveHost'; host.appendChild($('curveSvg')); body.appendChild(host); renderCurve(); }
+  else body.appendChild(createDevelopRows(DEVELOP_ROWS[developCategory] || []));
+  detail.hidden=developDetail==='midtone'||developDetail==='texture'||developCategory==='curve';
+  detail.textContent=(developDetail==='grading'&&developCategory==='color')||developDetail==='motion'?'さらに詳細 →':'詳細 →';
+  detail.onclick=()=>{
+    if(developDetail==='grading'&&developCategory==='color') developDetail='midtone';
+    else if(developCategory==='color') developDetail='grading';
+    else if(developCategory==='effect') developDetail=developDetail==='motion'?'texture':'motion';
+    else developDetail='detail';
+    renderDevelopPanel();
+  };
+}
+$('fineTuneBtn').onclick=()=>{ developFine=!developFine; renderDevelopPanel(); };
 
 // ===== 起動 =====
 function syncUIFromProject() {
@@ -6505,13 +10684,15 @@ function syncUIFromProject() {
   syncPresetToggle();
   syncMotionUI();
   syncChipBadges();
-  if (project.music) $('musicName').textContent = project.music.name;
   $('musicLoopChk').checked = !project.music || project.music.loop !== false;
-  syncMusicHint();
+  syncScreenAutoAmount(); syncScreenMusicUi();
   project.clips.forEach(c => { if (c.kind === 'video') c.video.muted = project.muteAll || c.muted; });
   applyLutSelection(preview);
   renderTimeline(); renderClipEdit();
   $('emptyHint').style.display = project.clips.length ? 'none' : 'flex';
+  project.posterTime = clamp(Number(project.posterTime) || 0, 0, timelineDur());
+  syncScreenLook(); updateTimeLabel();
+  if (document.body.classList.contains('ui-editor-v2')) renderDevelopPanel();
 }
 
 function normalizeRestoredState(st, allowLegacy = false) {
@@ -6524,7 +10705,10 @@ function normalizeRestoredState(st, allowLegacy = false) {
   if (!ASPECTS[safe.aspect]) safe.aspect = '16:9';
   if (!['mine', 'airu', 'film8', 'hikari', 'none', 'file'].includes(safe.lut)) safe.lut = 'hikari';
   safe.fit = safe.fit === 'cover' ? 'cover' : 'contain';
-  safe.impLen = [0, 2, 3, 5].includes(safe.impLen) ? safe.impLen : 3;
+  safe.impLen = [0, 1, 2, 3, 4, 5].includes(safe.impLen) ? safe.impLen : 3;
+  // Auto量を持たない既存作品は、現在のAuto結果を変えない100%として扱う。
+  safe.autoAmount = storedAutoAmount(st.autoAmount);
+  safe.posterTime = Number.isFinite(safe.posterTime) ? Math.max(0, safe.posterTime) : 0;
   safe.adjust.effect = [0, 1, 2].includes(safe.adjust.effect) ? safe.adjust.effect : 0;
   // ── 版1で保存された作品の引き上げ（版2以降には当てない）────────────────
   // 周辺減光は 2026-08-16 に意味が変わった（1.0倍が既定 → 1.0倍が下限・3.0倍が既定）。
@@ -6546,6 +10730,8 @@ function normalizeRestoredState(st, allowLegacy = false) {
   safe.adjust.leak = Number.isFinite(safe.adjust.leak) ? clamp(safe.adjust.leak, 0, 1) : 0;
   safe.adjust.trans = Number.isFinite(safe.adjust.trans) ? clamp(safe.adjust.trans, 0, 1) : 0;
   safe.adjust.judder = Number.isFinite(safe.adjust.judder) ? clamp(safe.adjust.judder, 0, 1) : 0;
+  // 既存作品に計画を後付けしない。不正な端末内データだけは計画なしへ安全に戻す。
+  if (!isHakumeiPlanProjectState(safe) || !validHakumeiPlan(safe.hakumeiPlan, safe.clips)) delete safe.hakumeiPlan;
   safe.texts = normalizeTexts(safe.texts, safe.clips);
   safe.adjust.hsl = normalizeHsl(safe.adjust.hsl);
   safe.adjust.curve = normalizeCurve(safe.adjust.curve);
@@ -6557,6 +10743,9 @@ function normalizeRestoredState(st, allowLegacy = false) {
     c.highKey = Number.isFinite(c.highKey) ? clamp(c.highKey, 0, 1) : 0;
     c.hsl = normalizeHsl(c.hsl);
     c.curve = normalizeCurve(c.curve);
+    if (!validClipObservation(c.analysisVersion, c.observation)) throw new Error('クリップの素材観察情報が不正です');
+    // 隣接フレーム差は後から足したfield。形が違えば捨てて、開いたときに測り直す
+    if (!validClipFrameStep(c.frameStep)) delete c.frameStep;
     // 収め方は後から足したfield。この2つ以外（未指定を含む）は「作品ぜんぶの設定に従う」
     if (c.fit !== 'cover' && c.fit !== 'contain') delete c.fit;
   });
@@ -6601,13 +10790,18 @@ function normalizeRestoredState(st, allowLegacy = false) {
   if (project.lut === 'file' && !project.lutFileData) project.lut = 'hikari';
   if (!st && project.mineLutData) project.lut = 'mine';
   ready = true;
+  if (frameStepSavePending) { frameStepSavePending = false; markDirty(); }
   if (!st) {
-    // 選択前はIDBへ作品を作らない。プリセット選択で初めて新規作品になる。
-    project.id = null; project.name = '';
-    syncUIFromProject(); creatingNewProject = true; $('presetContinue').style.display = 'none'; $('presetSheet').classList.add('on');
+    // 選択前はIDBへ作品を作らない。最初の素材が入った時点で薄明の新規作品にする。
+    resetProjectObject(makeEmptyProject(null, '薄明', new Date().toISOString(), PRESETS.hakumei));
+    syncUIFromProject(); creatingNewProject = false; $('presetContinue').style.display = 'none';
   } else { historyFor(project.id); updateHistoryUI(); }
   setSaveStatus('saved');
   await updateProjectSheet().catch(() => {});
+  $('aspectSlot').appendChild($('aspectSel'));   // 縦横の手動変更は書き出しタブ（2026-09-02 ユーザー決定）
+  // 端末側の自動削除（容量逼迫時の退避）から作品を守る。安全な接続（https / localhost）でだけ使える
+  try { if (navigator.storage?.persist) navigator.storage.persist().then(ok => trace('storage.persist', () => ({ ok }))); } catch (_) { }
+  enterHome();
 })();
 
 // 作品シートの配線。作品選択は現在の保存が成功した場合だけ反映する。
@@ -6643,13 +10837,17 @@ function closeProjectSheet() {
 }
 $('closeProjectSheet').onclick = closeProjectSheet;
 $('projectSheet').addEventListener('click', e => { if (e.target === $('projectSheet')) closeProjectSheet(); });
-$('newProjectBtn').onclick = () => { if (operationBusy) return; creatingNewProject = true; closeProjectSheet(); $('presetContinue').style.display = ''; $('presetSheet').classList.add('on'); };
+$('newProjectBtn').onclick = async () => {
+  if (operationBusy) return;
+  closeProjectSheet();
+  await newProjectFromPreset('hakumei');
+};
 $('renameProjectBtn').onclick = openRenameRow;
 $('saveRenameBtn').onclick = saveRenameRow;
 $('cancelRenameBtn').onclick = closeRenameRow;
 $('renameInput').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); saveRenameRow(); } else if (e.key === 'Escape') { e.preventDefault(); closeRenameRow(); } };
 $('duplicateProjectBtn').onclick = duplicateProject;
-$('clearProjectBtn').onclick = async () => { if (!project.id || operationBusy || !confirm('この作品の内容を空にします。作品名は残ります。')) return; await withProjectOperation('作品を空にしています…', async () => { const oldId = project.id; await beginExplicitProjectSave(); const before = beginHistory(), oldHistory = structuredClone(historyFor()); stopPlayback(); revokeRuntimeAssets(); clearOutputVideo(); project.clips = []; project.music = null; project.assetBytes = 0; selId = null; musicAudioBuf = null; syncUIFromProject(); clearPreview(); commitHistory(before); if (!(await saveState())) { clearTimeout(saveTimer); await hydrateProject(normalizeRestoredState(JSON.parse(before))); historyByProject.set(oldId, oldHistory); throw new Error('空の作品を保存できませんでした'); } await garbageCollect(); await updateProjectSheet(); }); };
+$('clearProjectBtn').onclick = async () => { if (!project.id || operationBusy || !confirm('この作品の内容を空にします。作品名は残ります。')) return; await withProjectOperation('作品を空にしています…', async () => { const oldId = project.id; await beginExplicitProjectSave(); const before = beginHistory(), oldHistory = structuredClone(historyFor()); stopPlayback(); revokeRuntimeAssets(); clearOutputVideo(); project.clips = []; project.music = null; project.assetBytes = 0; selId = null; musicAudioBuf = null; syncUIFromProject(); clearPreview(); syncScreenMode(); commitHistory(before); if (!(await saveState())) { clearTimeout(saveTimer); await hydrateProject(normalizeRestoredState(JSON.parse(before))); historyByProject.set(oldId, oldHistory); throw new Error('空の作品を保存できませんでした'); } await garbageCollect(); await updateProjectSheet(); }); };
 $('deleteProjectBtn').onclick = async () => {
   if (!project.id || operationBusy || !confirm(`「${project.name}」を削除します。素材は他の作品が使っている場合は残ります。`)) return;
   await withProjectOperation('作品を削除中…', async () => {
@@ -6709,6 +10907,7 @@ document.addEventListener('click', e => { if (!e.target.closest('#delClip,#moveL
   }).join('\n') || '（ログはまだありません。何度かボタンを押してから開いてください）';
   const open = () => { $('traceText').value = fmt(); $('traceSheet').classList.add('on'); };
   $('appVer').addEventListener('click', open);
+  document.querySelectorAll('.appVerMirror').forEach(m => m.addEventListener('click', open));
   $('traceClose').onclick = () => $('traceSheet').classList.remove('on');
   $('traceClear').onclick = () => { traceBuf.length = 0; $('traceText').value = fmt(); };
   $('traceCopy').onclick = async () => {
@@ -6766,10 +10965,18 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   let 深さ = 0;                       // 子要素をまたぐと dragleave が飛ぶので、出入りを数える
   const 幕 = () => $('dropVeil');
   const 見せる = on => { const v = 幕(); if (v) v.classList.toggle('on', on); };
-  const 効く = e => [...(e.dataTransfer?.types || [])].includes('Files');
+  const 効く = e => {
+    const dt = e.dataTransfer;
+    if (!dt) return false;
+    const types = [...(dt.types || [])].map(type => String(type).toLowerCase());
+    const items = [...(dt.items || [])];
+    // macOS Finderのpublic.file-urlと、File.typeがまだ空のドラッグも受ける。
+    return types.includes('files') || types.includes('public.file-url')
+      || items.some(item => item.kind === 'file') || !!dt.files?.length;
+  };
 
   window.addEventListener('dragenter', e => {
-    if (!効く(e) || exporting || operationBusy) return;
+    if (!効く(e) || exporting || operationBusy || importBusy || document.body.classList.contains('ui-confirm')) return;
     e.preventDefault(); 深さ++; 見せる(true);
   });
   window.addEventListener('dragover', e => { if (効く(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
@@ -6777,19 +10984,46 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('drop', async e => {
     if (!効く(e)) return;
     e.preventDefault(); 深さ = 0; 見せる(false);
-    if (exporting || operationBusy) { setProjectStatus('いま処理中です。終わってからもう一度落としてください'); return; }
+    if (exporting || operationBusy || importBusy) { setProjectStatus('いま処理中です。終わってからもう一度落としてください'); return; }
     const files = [...(e.dataTransfer.files || [])];
     if (!files.length) return;
-    const 動画 = files.filter(f => f.type.startsWith('video/'));
-    const 写真 = files.filter(f => f.type.startsWith('image/'));
-    const 音 = files.filter(f => f.type.startsWith('audio/'));
-    const 不明 = files.filter(f => !/^(video|image|audio)\//.test(f.type));
-    diag('落とされた', () => ({ 動画: 動画.length, 写真: 写真.length, 音: 音.length, 不明: 不明.length }));
-    if (動画.length) await addFiles(動画, 'video');
-    if (写真.length) await addFiles(写真, 'photo');
-    if (音.length) await 音楽を入れる(音[0]);          // 音楽は1曲だけ持てる
-    const 入れた = [動画.length && `動画${動画.length}本`, 写真.length && `写真${写真.length}枚`, 音.length && '音楽'].filter(Boolean);
-    if (入れた.length) setProjectStatus(入れた.join('と') + 'を入れました');
-    else setProjectStatus('動画・写真・音楽のファイルを落としてください');
+    if (document.body.classList.contains('ui-confirm')) {
+      $('confirmWarning').textContent = 'いま表示している素材を確認中です。追加する場合は、いったん「やめる」を押してください';
+      return;
+    }
+    const selection = splitImportFiles(files);
+    const videoCount = selection.visuals.filter(f => importFileKind(f) === 'video').length;
+    const photoCount = selection.visuals.length - videoCount;
+    diag('落とされた', () => ({ 動画: videoCount, 写真: photoCount, 音: selection.audio ? 1 : 0,
+      余分な音: selection.extraAudioCount, 不明: selection.unknown.length }));
+
+    // Homeはファイル選択と同じ確認画面を必ず通し、現在の保存作品へ直接追加しない。
+    if (document.body.classList.contains('ui-home')) {
+      if (selection.visuals.length) showConfirm(files);
+      else if (selection.audio) setHomeStatus('音楽だけでは作品を作れません。動画または写真を追加してください');
+      else setHomeStatus('動画・写真・音楽のファイルを落としてください');
+      return;
+    }
+
+    // 編集中は映像素材の元の並びを保って一括追加する。結果表示には実際の成功件数だけを使う。
+    importBusy = true;
+    try {
+      const result = await addFiles(selection.visuals, null, { newProject: false });
+      let audioAdded = false;
+      if (selection.audio && !result.cancelled && project.id && project.clips.length) {
+        try { await 音楽を入れる(selection.audio); audioAdded = true; }
+        catch (error) { logErr(`${selection.audio.name}: ${error.message}`); }
+      }
+      let status = '';
+      if (audioAdded) {
+        const visualStatus = result.successCount ? summarizeImportOutcome(result.added, result.failures).replace(/。$/, '') + '・' : '';
+        status = `${visualStatus}音楽を追加しました`;
+      } else if (!result.successCount && !result.failureCount && !result.cancelled) {
+        status = selection.audio ? '音楽を追加するには、先に動画または写真を追加してください' : '動画・写真・音楽のファイルを落としてください';
+      }
+      const warning = importSelectionWarning(selection);
+      if (warning) status = `${status ? status + '。' : ''}${warning}`;
+      if (status) setProjectStatus(status);
+    } finally { importBusy = false; }
   });
 }

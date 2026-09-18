@@ -230,8 +230,10 @@
   .card .nm { font-size:9px; color:var(--sub); white-space:nowrap; }
   .card.on .nm { color:var(--fg); font-weight:600; }
   /* B1は静的な色見本。現在フレームのライブサムネイル化はB2で行う */
+  .th-hakumei { background:linear-gradient(160deg,#f3f1e9,#b8c7cc 55%,#687b86); }
   .th-diary { background:linear-gradient(160deg,#f3d9c6,#c98f6a 55%,#6d4b38); }
   .th-mv    { background:linear-gradient(160deg,#cfe0ea,#7f9db4 55%,#3d5163); }
+  .th-mv2   { background:linear-gradient(160deg,#dfe9ee,#8fb0c2 55%,#3a5566); }
   .th-film8 { background:linear-gradient(160deg,#f0dcb4,#c79a5f 55%,#6b4f2d); }
   /* チップは見た目30px・実効タップ領域44px（上下に透明な余白を持たせる） */
   .chipRow .chip { flex:0 0 auto; height:30px; margin:7px 0; display:inline-flex; align-items:center; gap:5px;
@@ -310,9 +312,14 @@
   #devToggle { display:none; position:fixed; right:6px; top:110px; z-index:46; font-size:10px; color:var(--sub);
     background:rgba(30,30,36,.85); border:1px solid var(--line); border-radius:999px; padding:5px 10px; }
   #devToggle.shown { display:block; }
-  #devbar { display:none; position:fixed; right:6px; top:140px; z-index:45; flex-direction:column; gap:4px; align-items:flex-end; }
+  #devbar { display:none; position:fixed; right:6px; top:140px; z-index:45; flex-direction:column; gap:4px; align-items:flex-end;
+    max-height:calc(100dvh - 152px); overflow-y:auto; overscroll-behavior:contain; }
   #devbar.on { display:flex; }
   #devbar .btn { padding:4px 7px; font-size:10px; opacity:.9; background:rgba(30,30,36,.9); }
+  #hkr006HardnessDownloads { display:grid; grid-template-columns:repeat(2,max-content); gap:4px; justify-items:end; padding:6px;
+    border:1px solid var(--acc); border-radius:7px; background:rgba(30,30,36,.96); }
+  #hkr006HardnessDownloads b { grid-column:1 / -1; font-size:10px; color:var(--acc); }
+  #hkr006HardnessDownloads .btn { text-decoration:none; }
   /* 【2026-08-17】全画面の入力シートはやめた。別画面へ飛ぶと、打った字がどう見えるか分からず
      「決定→確認→書きかえる」を往復することになる。プレビューの文字に直に重ねて打つ。
      位置・書体・大きさ・傾きはJS側で文字に合わせる（ここでは器だけ決める） */
@@ -361,6 +368,19 @@
   #renameRow button { min-width:44px; min-height:44px; }
   #projectActionStatus,#projectStorageInfo { font-size:12px; color:var(--sub); white-space:pre-wrap; margin:9px 0; }
 
+  /* 動画の取り込み前に、使う長さを1〜5秒から選ぶ */
+  #importLenSheet { display:none; position:fixed; inset:0; z-index:80; background:rgba(0,0,0,.6);
+    align-items:flex-end; justify-content:center; padding:12px; }
+  #importLenSheet.on { display:flex; }
+  #importLenSheetCard { width:min(560px,100%); background:var(--panel); border:1px solid var(--line);
+    border-radius:16px 16px 10px 10px; padding:16px; }
+  #importLenSheetCard h2 { font-size:15px; margin:0 0 6px; text-align:center; font-weight:600; }
+  #importLenSheetCard .hint { text-align:center; margin:0 0 12px; }
+  #importLenChoices { display:flex; gap:7px; }
+  #importLenChoices .btn { flex:1; min-height:48px; padding:8px 2px; }
+  #importLenChoices .btn.on { color:var(--fg); border-color:var(--acc); box-shadow:0 0 0 1px var(--acc) inset; }
+  #importLenCancel { display:block; width:100%; margin-top:10px; background:none; border:none; color:var(--sub); }
+
   /* 新規プロジェクト/プリセット シート */
   #presetSheet { display:none; position:fixed; inset:0; z-index:50; background:rgba(0,0,0,.55); align-items:flex-end; justify-content:center; }
   #presetSheet.on { display:flex; }
@@ -374,6 +394,60 @@
   #saveStatus { color:var(--sub); font-size:11px; white-space:nowrap; }
   #appVer { color:var(--sub); font-size:10px; white-space:nowrap; opacity:.7; background:none; border:none; padding:2px 4px; touch-action:manipulation; }
   #appVer.stale { color:#e8a09a; opacity:1; font-weight:600; }
+  /* 新UI用の版表示（#appVer の写し）。SCREEN 03 の下部と現像パネルの左下 */
+  .appVerMirror { color:var(--sub); font-size:10px; white-space:nowrap; opacity:.6; background:none; border:0; padding:2px 4px; touch-action:manipulation; }
+  .appVerMirror.stale { color:#e8a09a; opacity:1; font-weight:600; }
+  /* 版は新UIのどの画面でも最上部に常時表示する（2026-09-02 ユーザー要望。薄く消えない） */
+  #verBadge { display:none; position:fixed; top:calc(2px + env(safe-area-inset-top)); left:50%; transform:translateX(-50%); z-index:200;
+    font-size:9.5px; padding:2px 9px; background:rgba(17,17,16,.6); color:#c9c7c0; border:0; border-radius:0 0 6px 6px; opacity:1; white-space:nowrap; }
+  #verBadge.stale { color:#e8a09a; font-weight:600; }
+  body.ui-home #verBadge, body.ui-confirm #verBadge, body.ui-generating #verBadge, body.ui-screen03 #verBadge, body.ui-editor-v2 #verBadge { display:block; visibility:visible; }
+  /* 保存状態の写し（旧ヘッダーの #saveStatus は新UIで隠れる）と、明示の保存ボタン */
+  .saveStatusMirror { color:var(--sub); font-size:10px; white-space:nowrap; }
+  .saveStatusMirror.error { color:#e8a09a; font-weight:600; }
+  #screenSaveRow { display:flex; align-items:center; gap:14px; }
+  #screenSaveBtn { border:1px solid var(--sub); border-radius:1px; background:none; color:var(--sub); font-size:11px; padding:6px 12px; min-height:32px; }
+  #screenSaveBtn.dirty { border-color:var(--fg); color:var(--fg); }
+
+  /* ===== SCREEN 01 ホーム / SCREEN 02 選択確認 / 生成表示（UI設計正本 §3〜§5・2026-09-02 実装）===== */
+  #screenHome, #screenConfirm, #generating { display:none; position:fixed; inset:0; z-index:60; }
+  body.ui-home #screenHome { display:flex; flex-direction:column; }
+  /* ホーム表示中は下の旧レイアウトを触れなくする（フォーカスも通さない） */
+  body.ui-home #app { visibility:hidden; }
+  body.ui-home #screenHome, body.ui-confirm #screenConfirm, body.ui-generating #generating { visibility:visible; }
+  #screenHome { background:#f6f4ee; color:#2a2925; padding:max(30px,env(safe-area-inset-top)) 22px max(22px,env(safe-area-inset-bottom)); overflow-y:auto; }
+  .homeLogo { font-size:21px; letter-spacing:.16em; font-weight:500; margin:14px 0 36px; text-align:center; }
+  #homePickBtn { display:block; width:min(320px,100%); margin:0 auto 44px; min-height:52px; border:1px solid #2a2925; border-radius:2px;
+    background:none; color:#2a2925; font-size:15px; letter-spacing:.06em; }
+  .homeRecentHead { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:12px; }
+  .homeRecentHead b { font-size:13px; font-weight:500; letter-spacing:.12em; }
+  #homeMoreBtn { border:0; background:none; color:#8a877e; font-size:12px; padding:6px 0 6px 14px; }
+  #homeRecent { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .homeCard { border:0; background:none; padding:0; text-align:left; color:#2a2925; min-width:0; }
+  .homeThumb { width:100%; aspect-ratio:1; border-radius:10px; background:#e6e2d8 center/cover no-repeat; }
+  .homeCard .nm { display:block; font-size:12px; margin-top:7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .homeCard .ori { display:block; font-size:10px; color:#8a877e; margin-top:2px; }
+  #homeRecentEmpty { color:#8a877e; font-size:12px; text-align:center; padding:26px 0; margin:0; }
+  #homeDropStatus { min-height:1.4em; color:#8a877e; font-size:11px; line-height:1.4; text-align:center; margin:-28px auto 28px; }
+  body.ui-confirm #screenConfirm { display:flex; flex-direction:column; }
+  #screenConfirm { z-index:65; background:var(--bg); color:var(--fg); padding:max(30px,env(safe-area-inset-top)) 22px max(22px,env(safe-area-inset-bottom)); }
+  #screenConfirm h2 { font-size:15px; font-weight:500; letter-spacing:.12em; margin:8px 0 4px; }
+  #confirmCount { color:var(--sub); font-size:12px; margin-bottom:16px; }
+  #confirmWarning { min-height:1.4em; color:#d6aa77; font-size:11px; line-height:1.5; margin:0 0 12px; }
+  #confirmList { flex:1; min-height:0; overflow-y:auto; display:grid; gap:8px; align-content:start; }
+  #confirmList div { border:1px solid var(--line); border-radius:8px; padding:10px 12px; font-size:12px; display:flex; justify-content:space-between; gap:10px; min-width:0; }
+  #confirmList span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #confirmList small { color:var(--sub); flex:none; }
+  #confirmStart { width:min(320px,100%); min-height:50px; margin:18px auto 0; display:block; }
+  #confirmCancel { display:block; margin:6px auto 0; border:0; background:none; color:var(--sub); min-height:40px; font-size:12px; }
+  body.ui-generating #generating { display:flex; align-items:center; justify-content:center; }
+  #generating { z-index:66; background:rgba(17,17,16,.94); color:var(--sub); font-size:13px; letter-spacing:.2em; }
+  /* 効果の詳細（動き／質感）で使う選択・切替の行 */
+  .developRow select.developSelect { grid-column:2/4; min-width:0; background:none; border:0; border-bottom:1px solid var(--line); color:var(--fg); font-size:11px; padding:6px 2px; }
+  .developRow select.developSelect:disabled { color:var(--sub); opacity:.6; }
+  .developToggle { grid-column:2/4; justify-self:end; border:1px solid var(--sub); border-radius:1px; background:none; color:var(--sub); font-size:11px; padding:6px 12px; }
+  .developToggle.on { border-color:var(--fg); background:var(--fg); color:var(--bg); }
+  #panel-export #aspectSlot select { height:40px; }
   #saveStatus.error, #durationBudget.over, #exportWarnings { color:#e8a09a; }
   #durationBudget { font-size:11px; color:var(--sub); white-space:nowrap; }
   #retrySaveBtn { display:none; }
@@ -404,6 +478,285 @@
     #presetSheetCard { max-width:680px; }
   }
   #openPresetBtn, #goExportBtn, #playBtn, #addClipBtn, nav button, #runExport, #retrySaveBtn { min-width:44px; min-height:44px; }
+
+  /* ===== SCREEN 03 → 現像（UI設計正本 2026-08-29）===== */
+  :root { --editor-panel-h:clamp(292px,38dvh,350px); --editor-nav-h:62px; }
+  #screen03Controls, #screen03Footer, #lookOverlay, #developPanelV2, #fullscreenControls, #developPreviewBack { display:none; }
+
+  .screen03Fade { transition:opacity .45s ease; }
+  body.screen03-ui-hidden .screen03Fade { opacity:0; pointer-events:none; }
+  body.ui-screen03 #app,
+  body.ui-editor-v2 #app { display:grid; grid-template-columns:1fr; }
+  body.ui-screen03 #app { grid-template-rows:minmax(0,1fr) calc(var(--editor-panel-h) + var(--editor-nav-h)); }
+  /* 現像画面は 映像／タイムライン106px／固定高パネル／固定ナビ の4段（2026-09-02 ユーザー決定 1b: タイムライン常時表示、映像側を縮める） */
+  body.ui-editor-v2 #app { grid-template-rows:minmax(0,1fr) 106px var(--editor-panel-h) var(--editor-nav-h); }
+  body.ui-screen03 header, body.ui-screen03 #transport, body.ui-screen03 #timelineWrap,
+  body.ui-screen03 #devToggle, body.ui-screen03 #devbar, body.ui-screen03 .panel,
+  body.ui-screen03 #mainNav { display:none !important; }
+  body.ui-editor-v2 header, body.ui-editor-v2 #transport,
+  body.ui-editor-v2 #devToggle, body.ui-editor-v2 #devbar { display:none !important; }
+  body.ui-screen03 #devbar.on, body.ui-editor-v2 #devbar.on { display:flex !important; }
+  body.ui-editor-v2 #timelineWrap { display:block; grid-row:2; margin:0; }
+  body.ui-screen03 #previewWrap, body.ui-editor-v2 #previewWrap {
+    grid-row:1; min-height:0; padding:22px 12px 12px; display:flex;   /* 上22px＝版バッジの分 */
+  }
+  body.ui-screen03 #previewBox, body.ui-editor-v2 #previewBox { border-radius:0; }
+
+  #screen03Controls { position:absolute; inset:0; z-index:30; pointer-events:none; }
+  body.ui-screen03 #screen03Controls { display:block; }
+  #screen03Controls button, #screen03Controls input { pointer-events:auto; }
+  #screen03TopRow { position:absolute; top:12px; left:12px; right:12px; display:grid;
+    grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:8px; }
+  #screen03TopRow button { min-height:44px; border:0; background:rgba(10,10,9,.5);
+    color:var(--fg); font-size:11px; padding:8px 10px; border-radius:2px; white-space:nowrap; }
+  #screen03TopRow #screenSaveRow { justify-self:center; min-width:0; }
+  #screen03TopRow #screenSaveRow .saveStatusMirror { overflow:hidden; text-overflow:ellipsis; }
+  #frameChangeBtn { position:static; }
+  /* 暫定: SCREEN 01 ができるまでの作品一覧への入口。ほかのUIと一緒に薄く消える */
+  #screenProjectsBtn { position:static; }
+  #screenPlayBtn { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:44px; height:44px;
+    border:1px solid rgba(244,243,239,.65); border-radius:50%; background:rgba(10,10,9,.28); color:var(--fg); font-size:15px; }
+  #screen03SeekRow { position:absolute; left:14px; right:14px; bottom:12px; display:grid;
+    grid-template-columns:minmax(0,1fr) auto 44px; align-items:center; gap:10px; }
+  #screenSeek { width:100%; margin:0; accent-color:var(--fg); }
+  #screenTime { font-size:10px; color:var(--fg); white-space:nowrap; font-variant-numeric:tabular-nums; }
+  #fullscreenBtn { width:44px; height:44px; padding:10px; border:0; background:rgba(10,10,9,.45); color:var(--fg); }
+  #fullscreenBtn svg { width:20px; height:20px; }
+
+  #screen03Footer { grid-row:2; min-height:0; padding:14px 22px max(18px,env(safe-area-inset-bottom));
+    flex-direction:column; align-items:stretch; justify-content:flex-end; gap:9px; background:var(--bg); }
+  body.ui-screen03 #screen03Footer { display:flex; }
+  #screen03AutoControls { width:min(420px,100%); margin:0 auto; }
+  #screen03AutoHead { display:flex; align-items:center; justify-content:space-between; color:var(--sub); font-size:11px; }
+  #screen03AutoAmountValue { color:var(--fg); font-variant-numeric:tabular-nums; }
+  #screenAutoAmount { display:block; width:100%; height:44px; margin:2px 0 0; accent-color:var(--fg); touch-action:manipulation; }
+  #screenRandomizeRow { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:7px; margin-top:2px; }
+  #screenRandomizeBtn, #screenUndoBtn { min-height:44px; border:1px solid var(--sub); border-radius:2px; background:none; color:var(--fg); padding:6px 8px; font-size:11px; }
+  #screenRandomizeBtn { min-width:0; }
+  #screenUndoBtn { min-width:76px; }
+  #screenUndoBtn:disabled { color:var(--sub); border-color:var(--line); }
+  #screen03QuickActions { width:min(520px,100%); margin:0 auto; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:7px; }
+  #screen03QuickActions button { min-width:0; min-height:44px; border:1px solid var(--line); border-radius:2px; background:none; color:var(--fg);
+    padding:6px 3px; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #screenLookName { color:var(--sub); font-size:9px; margin-left:3px; }
+  #developEnterBtn, #lookChangeBtn { width:auto; min-height:44px; border-radius:2px; }
+  #lookChangeBtn { color:var(--fg); }
+
+  .screenSheetHead { display:none; align-items:center; justify-content:space-between; min-height:44px; margin-bottom:6px; }
+  body.ui-screen03.screen-music-open #panel-music .screenSheetHead,
+  body.ui-screen03.screen-export-open #panel-export .screenSheetHead { display:flex; }
+  .screenSheetHead b { font-size:14px; font-weight:500; }
+  .screenSheetHead button { min-width:44px; min-height:44px; border:0; background:none; color:var(--sub); font-size:11px; }
+  #screenOriginalAudioRow { display:none; }
+  #musicRemoveBtn { min-width:44px; min-height:44px; color:var(--sub); }
+  body.ui-screen03.screen-music-open #panel-music,
+  body.ui-screen03.screen-export-open #panel-export { position:fixed; left:50%; right:auto; bottom:0; z-index:80; width:min(560px,100%);
+    max-height:min(82dvh,700px); margin:0; border:1px solid var(--line); border-bottom:0; border-radius:16px 16px 0 0;
+    overflow-y:auto; padding:12px 16px max(18px,env(safe-area-inset-bottom)); box-shadow:0 -8px 30px rgba(0,0,0,.35);
+    transform:translateX(-50%); }
+  body.ui-screen03.screen-music-open #panel-music,
+  body.ui-screen03.screen-export-open #panel-export { display:block !important; }
+  body.ui-screen03.screen-music-open #screen03Footer,
+  body.ui-screen03.screen-export-open #screen03Footer { visibility:hidden; pointer-events:none; }
+  body.ui-screen03.screen-music-open #musicMuteLegacyLabel,
+  body.ui-screen03.screen-music-open #musicLoopLabel { display:none; }
+  body.ui-screen03.screen-music-open #screenOriginalAudioRow { display:flex; }
+  body.ui-screen03.screen-music-open #panel-music #musicBtn { min-height:44px; }
+  body.ui-screen03.screen-export-open #panel-export { max-height:min(90dvh,800px); }
+  body.ui-screen03.screen-export-open #runExport,
+  body.ui-screen03.screen-export-open #dlLink,
+  body.ui-screen03.screen-export-open #shareBtn { min-height:44px; }
+  @media (max-width:360px) {
+    #screen03Footer { padding-left:12px; padding-right:12px; }
+    #screen03QuickActions { gap:4px; }
+    #screen03QuickActions button { font-size:10px; }
+  }
+
+  #lookOverlay { position:absolute; z-index:70; left:0; right:0; bottom:0;
+    height:calc(var(--editor-panel-h) + var(--editor-nav-h)); background:rgba(20,20,18,.96);
+    border-top:1px solid rgba(244,243,239,.16); padding:14px 0 max(14px,env(safe-area-inset-bottom)); }
+  body.ui-screen03.look-overlay-open #lookOverlay { display:block; }
+  body.ui-screen03.look-overlay-open #screen03Footer { visibility:hidden; }
+  .lookOverlayHead { height:38px; padding:0 16px; display:flex; align-items:center; justify-content:space-between; }
+  .lookOverlayHead b { font-size:12px; font-weight:500; }
+  #lookCancelBtn { border:0; background:none; color:var(--sub); min-width:44px; min-height:38px; text-align:left; }
+  #lookApplyBtn { color:var(--fg); background:none; border:1px solid currentColor; border-radius:1px; padding:6px 13px; }
+  #screenLookCards { display:flex; gap:12px; overflow-x:auto; overflow-y:hidden; padding:12px 16px 4px;
+    scrollbar-width:none; touch-action:pan-x; }
+  #screenLookCards::-webkit-scrollbar { display:none; }
+  .lookCard { flex:0 0 42%; border:0; background:none; color:var(--sub); padding:0; text-align:left; }
+  .lookCard .th { display:block; width:100%; aspect-ratio:4/3; height:auto; object-fit:cover; border:1px solid transparent; border-radius:2px; }
+  .lookCard .nm { display:block; padding:7px 1px; font-size:11px; }
+  .lookCard.on .th { border-color:var(--fg); }
+  .lookCard.on .nm { color:var(--fg); font-weight:600; }
+  #lookCompareHint { padding:8px 17px 0; color:var(--sub); font-size:10px; }
+
+  #developPanelV2 { grid-row:3; background:var(--panel); border-top:1px solid var(--line); overflow:hidden;
+    padding:8px 14px 6px; min-height:0; }
+  body.ui-editor-v2.develop-active #developPanelV2 { display:flex; flex-direction:column; }
+  body.ui-editor-v2.develop-active #panel-color { display:none !important; }
+  body.ui-editor-v2 #mainNav { display:flex; grid-row:4; min-height:0; }
+  body.ui-editor-v2 #mainNav button { position:relative; padding:7px 0 8px; }
+  body.ui-editor-v2 #mainNav button.on::after { content:''; position:absolute; left:27%; right:27%; bottom:3px; height:1px; background:currentColor; }
+  body.ui-editor-v2 .panel.on:not(#panel-color) { display:block; grid-row:3; height:var(--editor-panel-h); max-height:none;
+    overflow-y:auto; align-self:stretch; }
+  /* クリップタブ: 固定高パネルの中を トランスポート44px＋タイムライン106px＋クリップ道具 に分ける。
+     映像領域の位置・サイズは現像画面と同じまま（行2〜4の合計＝--editor-panel-h） */
+  /* クリップタブ: タイムラインは常時行にあるので、パネル側を トランスポート44px＋クリップ道具 に分ける */
+  body.ui-editor-v2.clips-active #app { grid-template-rows:minmax(0,1fr) 106px 44px calc(var(--editor-panel-h) - 44px) var(--editor-nav-h); }
+  body.ui-editor-v2.clips-active #transport { display:flex !important; grid-row:3; height:44px; padding:0; min-height:0; }
+  body.ui-editor-v2.clips-active #panel-clips.on { grid-row:4; height:calc(var(--editor-panel-h) - 44px); }
+  body.ui-editor-v2.clips-active #mainNav { grid-row:5; }
+  #developHead { flex:none; display:flex; align-items:center; justify-content:space-between; min-height:35px; }
+  #developBack { border:0; background:none; color:var(--sub); padding:6px 0; min-width:80px; text-align:left; font-size:11px; }
+  /* 完成画面へ戻る入口は、現像パネルで探さず映像の左上からいつでも戻れる。 */
+  body.ui-editor-v2 #developPreviewBack { display:block; position:fixed; left:12px; top:calc(12px + env(safe-area-inset-top)); z-index:70;
+    min-width:116px; min-height:44px; padding:8px 10px; color:var(--fg); background:rgba(10,10,9,.52); border:1px solid rgba(244,243,239,.3); border-radius:2px; }
+  #fineTuneBtn { border:1px solid var(--fg); border-radius:1px; background:none; color:var(--fg); padding:6px 10px; font-size:11px; }
+  #fineTuneBtn.on { background:var(--fg); color:var(--bg); }
+  #developCategories { flex:none; display:grid; grid-template-columns:repeat(5,1fr); height:48px; border-bottom:1px solid var(--line); }
+  .developCat { position:relative; border:0; background:none; color:var(--sub); padding:5px 0 7px; font-size:9px; }
+  .developCat .ic { display:block; height:17px; font-size:14px; line-height:17px; margin-bottom:3px; }
+  .developCat.on { color:var(--fg); font-weight:600; }
+  .developCat.on::after { content:''; position:absolute; left:24%; right:24%; bottom:-1px; height:1px; background:currentColor; }
+  #developBody { flex:1; min-height:0; display:flex; flex-direction:column; justify-content:center; }
+  .developRows { display:grid; grid-template-rows:repeat(6,minmax(29px,1fr)); min-height:0; flex:1; }
+  /* ラベル・数値は px 固定（em だと 16px 基準で膨らみ、バーが幅の45%しか取れなかった）。指で動かす幅を最優先 */
+  .developRow { display:grid; grid-template-columns:66px minmax(0,1fr) 52px; align-items:center; gap:8px; min-height:29px; }
+  /* 現像のスライダー: 当たり32px高・つまみ22px・トラック4px（指で掴める大きさ。色はアプリの文字色のまま） */
+  .developRow input[type=range], .developGradeAmountRow input[type=range] { -webkit-appearance:none; appearance:none; height:32px; background:transparent; cursor:pointer; }
+  .developRow input[type=range]::-webkit-slider-runnable-track, .developGradeAmountRow input[type=range]::-webkit-slider-runnable-track { height:4px; border-radius:2px; background:rgba(244,243,239,.28); }
+  .developRow input[type=range]::-webkit-slider-thumb, .developGradeAmountRow input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:22px; height:22px; margin-top:-9px; border-radius:50%; border:0; background:var(--fg); box-shadow:0 0 0 1px rgba(0,0,0,.35); }
+  .developRow input[type=range]::-moz-range-track, .developGradeAmountRow input[type=range]::-moz-range-track { height:4px; border-radius:2px; background:rgba(244,243,239,.28); }
+  .developRow input[type=range]::-moz-range-thumb, .developGradeAmountRow input[type=range]::-moz-range-thumb { width:22px; height:22px; border-radius:50%; border:0; background:var(--fg); }
+  .developRow label { color:var(--sub); font-size:10.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .developRow input[type=range] { width:100%; margin:0; }
+  .developNumber { width:100%; border:0; border-bottom:1px solid var(--line); background:transparent; color:var(--fg);
+    text-align:right; font-size:11px; padding:4px 2px; font-variant-numeric:tabular-nums; }
+  .developNumberWithUnit { display:flex; align-items:center; border-bottom:1px solid var(--line); min-width:0; }
+  .developNumberWithUnit .developNumber { border:0; min-width:0; padding-right:1px; }
+  .developNumberWithUnit span { flex:none; color:var(--sub); font-size:10px; padding-left:2px; }
+  .developGradeEntry { grid-column:2 / 4; min-width:0; border:0; border-bottom:1px solid var(--line); background:none; color:var(--fg);
+    display:flex; align-items:center; justify-content:flex-end; gap:8px; padding:4px 2px; font-size:10.5px; text-align:right; }
+  .developGradeEntry i { width:18px; height:18px; border-radius:50%; border:1px solid rgba(244,243,239,.58); flex:none; }
+  .developGradeEntry small { color:var(--sub); font-size:9.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .developGradeEntry b { color:var(--sub); font-size:14px; font-weight:400; }
+  /* ===== カラーホイール（2026-09-02 指操作性の改善）=====
+     ホイール表示中はカテゴリ行を隠し（戻りは「← カラー」）、その分ホイールを約200pxにする。
+     適用量バーはページの外に出して全幅にし、色相・彩度の数値は題名と同じ行に畳む。 */
+  :root { --grade-wheel:max(120px,min(58vw,240px,calc(var(--editor-panel-h) - 148px))); }
+  body.grading-view #developCategories { display:none; }
+  .developGradeView { flex:1; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+  .developGradeCarousel { flex:1; min-height:0; overflow:hidden; touch-action:none; }
+  .developGradeTrack { --grade-page-w:var(--grade-wheel); box-sizing:border-box; width:100%; height:100%; display:flex; gap:18px;
+    padding:0 max(0px,calc((100% - var(--grade-page-w))/2)); transition:transform .2s ease; }
+  .developGradePage { flex:0 0 var(--grade-page-w); min-width:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; }
+  .developGradePage:not(.on) .developGradeTitleRow { visibility:hidden; }
+  .developGradePage:not(.on) .developGradeWheel { pointer-events:none; opacity:.45; }
+  .developGradeTitleRow { flex:none; height:18px; display:flex; align-items:center; justify-content:center; gap:10px; white-space:nowrap; color:var(--sub); font-size:9.5px; }
+  .developGradeTitleRow b { color:var(--fg); font-size:11px; font-weight:500; margin-right:2px; }
+  .developGradeTitleRow label { display:flex; align-items:center; gap:3px; }
+  .developGradeTitleRow input { width:3.2em; border:0; border-bottom:1px solid var(--line); background:none; color:var(--fg);
+    text-align:right; font-size:10px; padding:2px 1px; font-variant-numeric:tabular-nums; }
+  .developGradeWheel { flex:none; position:relative; width:var(--grade-wheel); aspect-ratio:1; border-radius:50%; touch-action:none; transition:opacity .2s ease;
+    background:radial-gradient(circle,rgba(255,255,255,1) 0%,rgba(255,255,255,.82) 13%,rgba(255,255,255,0) 70%),
+      conic-gradient(#f33,#ff0,#0f8,#0cf,#23f,#f3f,#f33); }
+  .developGradePoint { position:absolute; width:22px; height:22px; border-radius:50%; border:2px solid var(--fg);
+    box-shadow:0 0 0 1px rgba(0,0,0,.8), 0 1px 4px rgba(0,0,0,.5); transform:translate(-50%,-50%); pointer-events:none; }
+  .developGradeDots { flex:none; text-align:center; height:14px; color:var(--sub); font-size:15px; line-height:11px; letter-spacing:6px; }
+  .developGradeDots b { color:var(--fg); font-weight:400; }
+  .developGradeAmountRow { flex:none; display:grid; grid-template-columns:66px minmax(0,1fr) 52px; align-items:center; gap:8px; min-height:30px; }
+  .developGradeAmountRow label { color:var(--sub); font-size:10.5px; white-space:nowrap; }
+  .developGradeAmountRow input[type=range] { min-width:0; width:100%; margin:0; }
+  .developGradeAmountRow .developNumber { font-size:11px; }
+  #developFooter { flex:none; min-height:27px; display:flex; justify-content:flex-end; align-items:center; }
+  #developDetailBtn { border:0; background:none; color:var(--fg); font-size:11px; padding:6px 0 4px 14px; }
+  .developOpenNote { color:var(--sub); font-size:11px; line-height:1.8; text-align:center; padding:20px; }
+  .developHslColors { display:grid; grid-template-columns:repeat(6,1fr); gap:8px; padding:4px 4px 10px; }
+  .developHslColor { border:0; background:none; color:var(--sub); font-size:10px; padding:2px; }
+  .developHslColor i { display:block; width:22px; height:22px; margin:0 auto 4px; border-radius:50%; border:1px solid transparent; }
+  .developHslColor.on { color:var(--fg); font-weight:600; }
+  .developHslColor.on i { border-color:var(--fg); box-shadow:0 0 0 2px var(--panel) inset; }
+  #developCurveHost { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; }
+  #developCurveHost svg { width:min(100%,330px); height:190px; touch-action:none; }
+
+  /* PCの現像画面は、映像と操作を左右へ分ける。
+     操作項目とDOMはモバイル版と共用し、配置だけを変える。 */
+  @media (min-width:820px) {
+    body.ui-editor-v2 #app,
+    body.ui-editor-v2.clips-active #app {
+      width:min(1440px,100%);
+      grid-template-columns:minmax(0,1fr) clamp(360px,32vw,440px);
+      grid-template-rows:minmax(0,1fr) 106px;
+      column-gap:12px;
+    }
+    body.ui-editor-v2 #previewWrap {
+      grid-column:1;
+      grid-row:1;
+      padding:22px 0 12px;
+    }
+    body.ui-editor-v2 #timelineWrap {
+      grid-column:1;
+      grid-row:2;
+    }
+    body.ui-editor-v2 #developPanelV2,
+    body.ui-editor-v2 .panel.on:not(#panel-color) {
+      grid-column:2;
+      grid-row:1 / 3;
+      height:auto;
+      max-height:none;
+      margin:0;
+      align-self:stretch;
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding-bottom:calc(var(--editor-nav-h) + 8px);
+    }
+    body.ui-editor-v2 #mainNav,
+    body.ui-editor-v2.clips-active #mainNav {
+      grid-column:2;
+      grid-row:2;
+      z-index:2;
+      align-self:end;
+      height:var(--editor-nav-h);
+      border:1px solid var(--line);
+      border-radius:0 0 12px 12px;
+    }
+    body.ui-editor-v2.clips-active #transport {
+      grid-column:2;
+      grid-row:1;
+      z-index:2;
+      align-self:start;
+      height:44px;
+      padding:0 14px;
+      background:var(--panel);
+      border:1px solid var(--line);
+      border-bottom:0;
+      border-radius:12px 12px 0 0;
+    }
+    body.ui-editor-v2.clips-active #panel-clips.on {
+      grid-column:2;
+      grid-row:1 / 3;
+      height:auto;
+      max-height:none;
+      margin:44px 0 0;
+      padding-bottom:calc(var(--editor-nav-h) + 8px);
+      border-radius:0 0 12px 12px;
+    }
+  }
+
+  #fullscreenControls { position:fixed; inset:0; z-index:120; pointer-events:auto; }
+  body.ui-fullscreen #fullscreenControls { display:block; }
+  #fullscreenBack, #fullscreenPlay { pointer-events:auto; position:absolute; color:var(--fg); background:rgba(10,10,9,.42); border:1px solid rgba(244,243,239,.45); }
+  #fullscreenBack { right:18px; top:calc(14px + env(safe-area-inset-top)); width:44px; height:44px; border-radius:50%; }
+  #fullscreenPlay { left:50%; top:50%; transform:translate(-50%,-50%); width:48px; height:48px; border-radius:50%; }
+  body.ui-fullscreen.fullscreen-ui-hidden #fullscreenControls { opacity:0; pointer-events:none; }
+  body.ui-fullscreen { background:#000; }
+  body.ui-fullscreen #app { max-width:none; width:100vw; height:100dvh; display:block; }
+  body.ui-fullscreen #app > :not(#previewWrap), body.ui-fullscreen #previewBox > :not(#previewCanvas) { display:none !important; }
+  body.ui-fullscreen #previewWrap { position:fixed; inset:0; padding:0; display:flex; }
+  body.ui-fullscreen #previewBox { border-radius:0; }
+  body.ui-fullscreen #previewCanvas { max-width:100vw; max-height:100dvh; }
+
 </style>
 </head>
 <body>
@@ -434,8 +787,70 @@
       <textarea id="textInline" maxlength="120" rows="1" spellcheck="false"></textarea>
       <div id="beforeBadge" hidden>調整前</div>
       <div id="emptyHint">右下の＋から動画・写真を追加してください</div>
+      <button id="developPreviewBack" type="button">← プレビューに戻る</button>
+      <div id="screen03Controls" class="screen03Fade">
+        <div id="screen03TopRow">
+          <button id="screenProjectsBtn">ホーム</button>
+          <div id="screenSaveRow"><span class="saveStatusMirror" aria-live="polite">保存済み</span><button id="screenSaveBtn" type="button">いま保存</button></div>
+          <button id="frameChangeBtn">フレーム変更</button>
+        </div>
+        <button id="screenPlayBtn" aria-label="再生">▶</button>
+        <div id="screen03SeekRow">
+          <input type="range" id="screenSeek" min="0" max="0" step="0.01" value="0" aria-label="再生位置">
+          <span id="screenTime">0:00 / 0:00</span>
+          <button id="fullscreenBtn" aria-label="横向き全画面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg></button>
+        </div>
+      </div>
     </div>
+    <div id="fullscreenControls"><button id="fullscreenBack" aria-label="縦画面へ戻る">↙</button><button id="fullscreenPlay" aria-label="再生">▶</button></div>
   </div>
+
+  <section id="screen03Footer" class="screen03Fade" aria-label="完成した映像">
+    <div id="screen03AutoControls">
+      <div id="screen03AutoHead"><span>自動現像の量</span><output id="screenAutoAmountValue">100%</output></div>
+      <input type="range" id="screenAutoAmount" min="0" max="100" step="1" value="100" aria-label="自動現像の量">
+      <div id="screenRandomizeRow">
+        <button id="screenRandomizeBtn" type="button">別の仕上がり</button>
+        <button id="screenUndoBtn" type="button" aria-label="別の仕上がりを取り消す" disabled>取り消す</button>
+      </div>
+    </div>
+    <div id="screen03QuickActions">
+      <button id="lookChangeBtn" type="button">Look<span id="screenLookName">手動</span></button>
+      <button id="screenMusicBtn" type="button">音楽</button>
+      <button id="developEnterBtn" type="button">現像</button>
+      <button id="screenExportBtn" type="button">書き出し</button>
+    </div>
+  </section>
+
+  <section id="lookOverlay" aria-label="Look変更">
+    <div class="lookOverlayHead"><button id="lookCancelBtn">閉じる</button><b>Look変更</b><button id="lookApplyBtn">適用</button></div>
+    <div id="screenLookCards">
+      <button class="lookCard" data-preset="hakumei"><span class="th th-hakumei"></span><span class="nm">薄明</span></button>
+      <button class="lookCard" data-preset="diary"><span class="th th-diary"></span><span class="nm">自分の色</span></button>
+      <button class="lookCard" data-preset="mv"><span class="th th-mv"></span><span class="nm">青い記憶</span></button>
+      <button class="lookCard" data-preset="mv2"><span class="th th-mv2"></span><span class="nm">青い記憶 v2</span></button>
+      <button class="lookCard" data-preset="film8"><span class="th th-film8"></span><span class="nm">8mmホーム</span></button>
+    </div>
+    <p id="lookCompareHint">長押ししている間、適用済みのLookと比べられます</p>
+  </section>
+
+  <section id="screenHome" aria-label="ホーム">
+    <div class="homeLogo">ひかりを編む</div>
+    <button id="homePickBtn">＋ 動画を選ぶ</button>
+    <p id="homeDropStatus" aria-live="polite"></p>
+    <div class="homeRecentHead"><b>このごろ</b><button id="homeMoreBtn">もっと見る</button></div>
+    <div id="homeRecent"></div>
+    <p id="homeRecentEmpty" hidden>動画を選ぶと、ここに映像が並びます</p>
+  </section>
+  <section id="screenConfirm" aria-label="選んだ素材の確認">
+    <h2>選んだ素材</h2>
+    <div id="confirmCount"></div>
+    <p id="confirmWarning" aria-live="polite"></p>
+    <div id="confirmList"></div>
+    <button class="btn primary" id="confirmStart">編み始める</button>
+    <button id="confirmCancel">やめる</button>
+  </section>
+  <div id="generating">薄明を編んでいます</div>
 
   <div id="transport">
     <span id="timeLabel">0:00 / 0:00</span>
@@ -467,11 +882,34 @@
   <input type="file" id="lutFileInput" accept=".cube" hidden>
   <input type="file" id="musicFileInput" accept="audio/*" hidden>
 
+  <section id="developPanelV2" aria-label="現像操作パネル">
+    <div id="developHead"><button id="developBack" hidden>← ライト</button><button id="fineTuneBtn">微調整</button></div>
+    <div id="developCategories"></div>
+    <div id="developBody"></div>
+    <div id="developFooter"><span class="saveStatusMirror" style="margin-right:auto"></span><button id="developDetailBtn">詳細 →</button></div>
+  </section>
+
   <button id="devToggle">dev ▾</button>
   <div id="devbar">
     <button class="btn sm" id="devClip">サンプル動画</button>
     <button class="btn sm" id="devPhoto">サンプル写真</button>
     <button class="btn sm" id="devMusic">サンプル音楽</button>
+    <button class="btn sm" id="hkr005VisualCExport">目視基準C2の比較を書き出す</button>
+    <button class="btn sm" id="hkr005VisualCMutedExport">C2の緑の彩度・輝度を下げて比較</button>
+    <button class="btn sm" id="hkr005YellowHighlightExport">C2の黄色ハイライトを調整して比較</button>
+    <button class="btn sm" id="hkr005YellowSeparatedExport">写真基準で黄色と青緑を分けて比較</button>
+    <button class="btn sm" id="hkr005VerifyAutoIsolation">比較Auto分離を検査</button>
+    <button class="btn sm" id="hkr006HighlightRolloffExport">HKR-006 白のロールオフを3案比較</button>
+    <button class="btn sm" id="hkr006HardnessExport">HKR-006 硬さ低減 中／強を比較</button>
+    <button class="btn sm" id="hkr006ObservationExport">HKR-006 T1 素材観察JSON</button>
+    <a class="btn sm" id="hkr006ObservationJsonLink" hidden download>観察JSONを保存</a>
+    <div id="hkr006HardnessDownloads" hidden aria-label="HKR-006 6素材比較の保存">
+      <b>HKR-006 6素材比較を保存</b>
+      <a class="btn sm" id="hkr006HardnessPngLink" download>PNGを保存</a>
+      <a class="btn sm" id="hkr006HardnessJsonLink" download>完全なJSONを保存</a>
+    </div>
+    <button class="btn sm" id="hkr006T0dEveningDiagnostic">HKR-006 T0d 夕方限定診断</button>
+    <span id="hkr005VisualCStatus" style="font-size:11px;color:var(--muted)"></span>
     <button class="btn sm" id="devFailSave">次の保存を失敗</button>
     <button class="btn sm" id="devTrace">ログを見る</button>
   </div>
@@ -494,8 +932,10 @@
         <div class="row">
           <label>取り込み長さ</label>
           <select id="presetSel">
+            <option value="1">先頭から1秒</option>
             <option value="2">先頭から2秒</option>
             <option value="3" selected>先頭から3秒</option>
+            <option value="4">先頭から4秒</option>
             <option value="5">先頭から5秒</option>
             <option value="0">全部</option>
           </select>
@@ -580,8 +1020,10 @@
   <div class="panel" id="panel-color">
     <button class="chip" id="presetToggle" aria-expanded="false">完成イメージ ▾<b></b></button>
 <div class="cardRow" id="lookPresets" hidden>
+      <button class="card" data-preset="hakumei"><span class="th th-hakumei"></span><span class="nm">薄明</span></button>
       <button class="card" data-preset="diary"><span class="th th-diary"></span><span class="nm">自分の色</span></button>
       <button class="card" data-preset="mv"><span class="th th-mv"></span><span class="nm">青い記憶</span></button>
+      <button class="card" data-preset="mv2"><span class="th th-mv2"></span><span class="nm">青い記憶 v2</span></button>
       <button class="card" data-preset="film8"><span class="th th-film8"></span><span class="nm">8mmホーム</span></button>
     </div>
 
@@ -698,6 +1140,9 @@
       <div class="row"><label for="uDamage">経年の跡</label><input type="range" id="uDamage" min="0" max="100" value="8"><output>8</output></div>
       <div class="row" id="rowFilmProfile"><label for="filmProfileSel">種類</label>
         <select id="filmProfileSel">
+          <option value="hakumei-v1">薄明 v1</option>
+          <option value="hakumei-v2">薄明 v2</option>
+          <option value="aoi-v2">青い記憶 v2</option>
           <option value="home8">8mmホームムービー</option>
           <option value="super8_reversal">Super8 リバーサル</option>
           <option value="super8_negative">Super8 モダンネガ</option>
@@ -762,11 +1207,14 @@
   <div id="dropVeil"><div><b>ここに落としてください</b>動画・写真は素材に、音楽は曲として入ります</div></div>
 
   <div class="panel" id="panel-music">
-    <label class="chk"><input type="checkbox" id="muteAllChk"> 元の音を消して、音楽だけにする</label>
+    <div class="screenSheetHead"><b>音楽</b><button id="screenMusicClose" type="button">閉じる</button></div>
+    <label class="chk" id="screenOriginalAudioRow"><input type="checkbox" id="screenOriginalAudio"> 元の音を使う</label>
+    <label class="chk" id="musicMuteLegacyLabel"><input type="checkbox" id="muteAllChk"> 元の音を消して、音楽だけにする</label>
     <p class="hint">オフなら元の音をそのまま書き出します（既定）。</p>
     <div class="divider"></div>
     <div class="row">
       <button class="btn" id="musicBtn">音楽を選ぶ</button>
+      <button class="btn" id="musicRemoveBtn" type="button">外す</button>
       <span class="hint" id="musicName">未選択</span>
     </div>
     <div class="row"><label>音量</label><input type="range" id="musicVol" min="0" max="100" value="70"><output>70</output></div>
@@ -776,11 +1224,13 @@
     </div>
     <!-- ラベルは「曲の位置」。「曲のどこから」は2行に折れて収まりが悪かった -->
     <div class="row" id="musicOffsetRow" hidden><label>曲の位置</label><input type="range" id="musicOffset" min="0" max="100" value="0"><output>0:00</output></div>
-    <label class="chk"><input type="checkbox" id="musicLoopChk" checked> 曲が短いときはくり返す</label>
+    <label class="chk" id="musicLoopLabel"><input type="checkbox" id="musicLoopChk" checked> 曲が短いときはくり返す</label>
     <p class="hint" id="musicLenHint">曲は自動でフェードイン・アウトします。</p>
   </div>
 
   <div class="panel" id="panel-export">
+    <div class="screenSheetHead"><b>書き出し</b><button id="screenExportClose" type="button">閉じる</button></div>
+    <div class="row"><label>縦横</label><span id="aspectSlot"></span><span style="flex:1"></span></div>
     <div class="row">
       <label>解像度</label>
       <select id="resSel"><option value="1080">1080p</option></select>
@@ -800,7 +1250,7 @@
 
   <nav id="mainNav">
     <button data-tab="clips"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 12h4M17 12h4"/></svg>クリップ</button>
-    <button data-tab="color"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="8.5" cy="10" r="1.3" fill="currentColor"/><circle cx="14.5" cy="8" r="1.3" fill="currentColor"/><circle cx="15.2" cy="14" r="1.3" fill="currentColor"/></svg>見た目</button>
+    <button data-tab="color"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="8.5" cy="10" r="1.3" fill="currentColor"/><circle cx="14.5" cy="8" r="1.3" fill="currentColor"/><circle cx="15.2" cy="14" r="1.3" fill="currentColor"/></svg>現像</button>
     <button data-tab="text"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 6h14M12 6v13"/></svg>文字</button>
     <button data-tab="music"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></svg>音楽</button>
     <button data-tab="export"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 19V5M6 11l6-6 6 6"/></svg>書き出し</button>
@@ -825,9 +1275,28 @@
   <pre id="log"></pre>
 </div>
 
+<div id="importLenSheet" role="dialog" aria-modal="true" aria-labelledby="importLenTitle">
+  <div id="importLenSheetCard">
+    <h2 id="importLenTitle">動画を何秒使いますか？</h2>
+    <p class="hint">先頭から使う長さを選んでください。</p>
+    <div id="importLenChoices" class="segRow">
+      <button class="btn" data-import-len="1" type="button">1秒</button>
+      <button class="btn" data-import-len="2" type="button">2秒</button>
+      <button class="btn" data-import-len="3" type="button">3秒</button>
+      <button class="btn" data-import-len="4" type="button">4秒</button>
+      <button class="btn" data-import-len="5" type="button">5秒</button>
+    </div>
+    <button class="btn sm" id="importLenCancel" type="button">キャンセル</button>
+  </div>
+</div>
+
 <div id="presetSheet">
   <div id="presetSheetCard">
     <h2>どんな作品にしますか？</h2>
+    <button class="presetCard" id="presetHakumei">
+      <span class="pic">◯</span>
+      <span><p class="pn">薄明</p><p class="pd">白く柔らかな光と、青〜シアンの影。素材の縦横と音を保ちます</p></span>
+    </button>
     <button class="presetCard" id="presetDiary">
       <span class="pic">📔</span>
       <span><p class="pn">自分の色</p><p class="pd">日々の光を、そのまま作品に。たて型・原音・3秒クリップ</p></span>
@@ -835,6 +1304,10 @@
     <button class="presetCard" id="presetMv">
       <span class="pic">🎬</span>
       <span><p class="pn">青い記憶</p><p class="pd">青い滲みと静かな間でつくる。よこ型・音楽・5秒クリップ</p></span>
+    </button>
+    <button class="presetCard" id="presetMv2">
+      <span class="pic">🎞️</span>
+      <span><p class="pn">青い記憶 v2</p><p class="pd">柔らかい粒子と膜、不規則なコマ、青白い光。よこ型・音楽・5秒クリップ</p></span>
     </button>
     <button class="presetCard" id="presetFilm8">
       <span class="pic">🎞</span>
@@ -877,6 +1350,7 @@
 @font-face { font-family:'Yusei Magic';     src:url('./fonts/marker.woff2') format('woff2'); font-weight:400; font-display:swap; }
 </style>
 <script src="./vendor/mp4box.all.min.js"></script>
-<script type="module" src="./app.js?v=2026-08-23a"></script>
+<button id="verBadge" class="appVerMirror" type="button" title="タップで診断ログ"></button>
+<script type="module" src="./app.js?v=2026-09-19b" data-sha256="60927e8847b51870e85b8c206c0f23db6c92cada81786c398de9c0a583325607"></script>
 </body>
 </html>
