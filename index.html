@@ -414,7 +414,7 @@
   body.ui-home #screenHome { display:flex; flex-direction:column; }
   /* ホーム表示中は下の旧レイアウトを触れなくする（フォーカスも通さない） */
   body.ui-home #app { visibility:hidden; }
-  body.ui-home #screenHome, body.ui-confirm #screenConfirm, body.ui-generating #generating { visibility:visible; }
+  body.ui-home #screenHome, body.ui-home #homeCardSheet, body.ui-confirm #screenConfirm, body.ui-generating #generating { visibility:visible; }
   #screenHome { background:#f6f4ee; color:#2a2925; padding:max(30px,env(safe-area-inset-top)) 22px max(22px,env(safe-area-inset-bottom)); overflow-y:auto; }
   .homeLogo { font-size:21px; letter-spacing:.16em; font-weight:500; margin:14px 0 36px; text-align:center; }
   #homePickBtn { display:block; width:min(320px,100%); margin:0 auto 44px; min-height:52px; border:1px solid #2a2925; border-radius:2px;
@@ -423,7 +423,17 @@
   .homeRecentHead b { font-size:13px; font-weight:500; letter-spacing:.12em; }
   #homeMoreBtn { border:0; background:none; color:#8a877e; font-size:12px; padding:6px 0 6px 14px; }
   #homeRecent { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
-  .homeCard { border:0; background:none; padding:0; text-align:left; color:#2a2925; min-width:0; }
+  .homeCard { border:0; background:none; padding:0; text-align:left; color:#2a2925; min-width:0; -webkit-touch-callout:none; touch-action:pan-y; }
+  .homeCard.pressing .homeThumb { transform:scale(.96); transition:transform .18s ease; }
+  /* ホームのカード長押し → この作品への操作（HKR-009）。ホームと同じ明るい配色 */
+  #homeCardSheet { display:none; position:fixed; inset:0; z-index:72; background:rgba(42,41,37,.42); padding:12px; }
+  #homeCardSheet.on { display:flex; align-items:flex-end; justify-content:center; }
+  #homeCardSheetCard { width:min(420px,100%); background:#f6f4ee; color:#2a2925; border-radius:14px 14px 8px 8px; padding:16px 16px max(16px,env(safe-area-inset-bottom)); display:grid; gap:8px; }
+  #homeCardSheetName { font-size:13px; letter-spacing:.06em; margin:0 0 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #homeCardSheetCard button { min-height:48px; border:1px solid #2a2925; border-radius:2px; background:none; color:#2a2925; font-size:14px; letter-spacing:.06em; }
+  #homeCardSheetCard button.danger { color:#9c3b32; border-color:#9c3b32; }
+  #homeCardSheetCard button.quiet { border-color:transparent; color:#8a877e; }
+  #homeCardSheetHint { font-size:11px; color:#8a877e; margin:2px 0 0; }
   .homeThumb { width:100%; aspect-ratio:1; border-radius:10px; background:#e6e2d8 center/cover no-repeat; }
   .homeCard .nm { display:block; font-size:12px; margin-top:7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .homeCard .ori { display:block; font-size:10px; color:#8a877e; margin-top:2px; }
@@ -535,7 +545,7 @@
   #screenRandomizeBtn { min-width:0; }
   #screenUndoBtn { min-width:76px; }
   #screenUndoBtn:disabled { color:var(--sub); border-color:var(--line); }
-  #screen03QuickActions { width:min(520px,100%); margin:0 auto; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:7px; }
+  #screen03QuickActions { width:min(520px,100%); margin:0 auto; display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:7px; }
   #screen03QuickActions button { min-width:0; min-height:44px; border:1px solid var(--line); border-radius:2px; background:none; color:var(--fg);
     padding:6px 3px; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   #screenLookName { color:var(--sub); font-size:9px; margin-left:3px; }
@@ -571,6 +581,8 @@
     #screen03QuickActions { gap:4px; }
     #screen03QuickActions button { font-size:10px; }
   }
+  /* 5つ並ぶと狭い端末で Look 名が切れるので、名前は隠して「Look」だけにする */
+  @media (max-width:420px) { #screenLookName { display:none; } }
 
   #lookOverlay { position:absolute; z-index:70; left:0; right:0; bottom:0;
     height:calc(var(--editor-panel-h) + var(--editor-nav-h)); background:rgba(20,20,18,.96);
@@ -817,6 +829,7 @@
     <div id="screen03QuickActions">
       <button id="lookChangeBtn" type="button">Look<span id="screenLookName">手動</span></button>
       <button id="screenMusicBtn" type="button">音楽</button>
+      <button id="screenClipsBtn" type="button">クリップ</button>
       <button id="developEnterBtn" type="button">現像</button>
       <button id="screenExportBtn" type="button">書き出し</button>
     </div>
@@ -842,6 +855,15 @@
     <div id="homeRecent"></div>
     <p id="homeRecentEmpty" hidden>動画を選ぶと、ここに映像が並びます</p>
   </section>
+  <div id="homeCardSheet" role="dialog" aria-modal="true" aria-label="この作品への操作">
+    <div id="homeCardSheetCard">
+      <p id="homeCardSheetName"></p>
+      <button id="homeCardOpenBtn" type="button">開く</button>
+      <button id="homeCardDeleteBtn" type="button" class="danger">削除</button>
+      <button id="homeCardCancelBtn" type="button" class="quiet">やめる</button>
+      <p id="homeCardSheetHint">名前の変更や複製は「もっと見る」から</p>
+    </div>
+  </div>
   <section id="screenConfirm" aria-label="選んだ素材の確認">
     <h2>選んだ素材</h2>
     <div id="confirmCount"></div>
@@ -1351,6 +1373,6 @@
 </style>
 <script src="./vendor/mp4box.all.min.js"></script>
 <button id="verBadge" class="appVerMirror" type="button" title="タップで診断ログ"></button>
-<script type="module" src="./app.js?v=2026-09-19b" data-sha256="60927e8847b51870e85b8c206c0f23db6c92cada81786c398de9c0a583325607"></script>
+<script type="module" src="./app.js?v=2026-09-19c" data-sha256="2c073cab207d32058097f513d677f340dbe884cc487b7d67004b7692a39f7406"></script>
 </body>
 </html>

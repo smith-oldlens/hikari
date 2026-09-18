@@ -66,7 +66,7 @@ function seekTo(video, t, fast) {
 // ===== 状態 =====
 // 実機検証の生命線。画面の版数と一致しないJSが動いていたら、それはキャッシュ・生き残ったタブの仕業。
 // 「押せない」系の報告が来たら、直す前にまずこの表示を確認してもらう（2026-08-15の教訓）
-const APP_VERSION = '2026-09-19b';
+const APP_VERSION = '2026-09-19c';
 // 作品の保存の形。**1 の時代に無かったもの**＝文字・つなぎの手動指定・おわり・音楽の位置とループ。
 // 形そのものは 1 のまま読めるが、**意味が変わった項目**（周辺減光）があるので、
 // どちらの時代に保存されたのかを見分けられるようにした。
@@ -10083,10 +10083,48 @@ async function renderHomeRecent() {
     const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = m.name;
     const ori = document.createElement('span'); ori.className = 'ori'; ori.textContent = ['9:16', '4:5'].includes(m.aspect) ? '縦' : '横';
     b.append(th, nm, ori);
-    b.onclick = async () => { if (m.id === project.id) { if (project.clips.length) enterScreen03(); return; } await switchProject(m.id); };
+    b.onclick = async () => { if (suppressCardClick) { suppressCardClick = false; return; } await openProjectFromHome(m.id); };
+    attachHomeCardLongPress(b, m);
     host.appendChild(b);
   });
 }
+async function openProjectFromHome(id) {
+  if (id === project.id) { if (project.clips.length) enterScreen03(); return; }
+  await switchProject(id);
+}
+// ホームのカード長押し（HKR-009・2026-09-19）: 500ms 動かさずに押すと、この作品への操作シート（開く／削除）。
+// 少しでも動いたらスクロールとみなして取り消す。長押しのあとに出る click は開く操作に取り違えない。
+let suppressCardClick = false, homeCardSheetTarget = null;
+function attachHomeCardLongPress(card, meta) {
+  let timer = 0, x0 = 0, y0 = 0, pid = null;
+  const cancel = () => { clearTimeout(timer); timer = 0; pid = null; card.classList.remove('pressing'); };
+  card.addEventListener('pointerdown', e => {
+    if (!e.isPrimary || operationBusy) return;
+    x0 = e.clientX; y0 = e.clientY; pid = e.pointerId; card.classList.add('pressing');
+    timer = setTimeout(() => { timer = 0; card.classList.remove('pressing'); suppressCardClick = true; openHomeCardSheet(meta); }, 500);
+  });
+  card.addEventListener('pointermove', e => { if (pid === e.pointerId && timer && Math.hypot(e.clientX - x0, e.clientY - y0) > 8) cancel(); });
+  for (const type of ['pointerup', 'pointercancel', 'pointerleave']) card.addEventListener(type, cancel);
+  card.addEventListener('contextmenu', e => e.preventDefault());
+}
+function openHomeCardSheet(meta) {
+  homeCardSheetTarget = meta;
+  $('homeCardSheetName').textContent = meta.name;
+  $('homeCardSheet').classList.add('on');
+}
+function closeHomeCardSheet() { homeCardSheetTarget = null; $('homeCardSheet').classList.remove('on'); }
+$('homeCardSheet').addEventListener('click', e => { if (e.target === e.currentTarget) closeHomeCardSheet(); });
+$('homeCardCancelBtn').onclick = closeHomeCardSheet;
+$('homeCardOpenBtn').onclick = async () => { const m = homeCardSheetTarget; closeHomeCardSheet(); if (m) await openProjectFromHome(m.id); };
+$('homeCardDeleteBtn').onclick = async () => {
+  const m = homeCardSheetTarget; if (!m || operationBusy) return;
+  if (!confirm(`「${m.name}」を削除します。素材は他の作品が使っている場合は残ります。`)) return;
+  closeHomeCardSheet();
+  // 削除の本体は「いま開いている作品を消す」既存の処理と同じ。開いていない作品は先に切り替えてから消す。
+  if (m.id !== project.id) { await switchProject(m.id); if (project.id !== m.id) { setHomeStatus('切り替えられなかったため削除しませんでした'); return; } }
+  await deleteCurrentProject();
+  enterHome();
+};
 // ===== SCREEN 02 選択確認 → 生成表示 =====
 let pendingHomeFiles = null;
 function showConfirm(files) {
@@ -10231,6 +10269,8 @@ $('screenPlayBtn').onclick = e => { e.stopPropagation(); playing ? stopPlayback(
 $('fullscreenPlay').onclick = e => { e.stopPropagation(); playing ? stopPlayback() : play(); };
 $('developPreviewBack').onclick = () => enterScreen03({ keepPosition: true });
 $('developEnterBtn').onclick = enterDevelopEditor;
+// 完成した映像 →「クリップ」: 現像画面のクリップタブへ直行（追加・並べ替え・トリム・削除は既存のタイムラインで行う・HKR-009）
+$('screenClipsBtn').onclick = () => { enterDevelopEditor(); switchTab('clips', true); };
 $('lookChangeBtn').onclick = openLookOverlay;
 $('screenMusicBtn').onclick = e => { e.stopPropagation(); void openScreenMusicSheet(); };
 $('screenExportBtn').onclick = e => { e.stopPropagation(); openScreenExportSheet(); };
@@ -10850,6 +10890,11 @@ $('duplicateProjectBtn').onclick = duplicateProject;
 $('clearProjectBtn').onclick = async () => { if (!project.id || operationBusy || !confirm('この作品の内容を空にします。作品名は残ります。')) return; await withProjectOperation('作品を空にしています…', async () => { const oldId = project.id; await beginExplicitProjectSave(); const before = beginHistory(), oldHistory = structuredClone(historyFor()); stopPlayback(); revokeRuntimeAssets(); clearOutputVideo(); project.clips = []; project.music = null; project.assetBytes = 0; selId = null; musicAudioBuf = null; syncUIFromProject(); clearPreview(); syncScreenMode(); commitHistory(before); if (!(await saveState())) { clearTimeout(saveTimer); await hydrateProject(normalizeRestoredState(JSON.parse(before))); historyByProject.set(oldId, oldHistory); throw new Error('空の作品を保存できませんでした'); } await garbageCollect(); await updateProjectSheet(); }); };
 $('deleteProjectBtn').onclick = async () => {
   if (!project.id || operationBusy || !confirm(`「${project.name}」を削除します。素材は他の作品が使っている場合は残ります。`)) return;
+  await deleteCurrentProject();
+};
+// いま開いている作品を削除する（作品一覧シートとホームの長押しから共用）。失敗したら元に戻す。
+async function deleteCurrentProject() {
+  if (!project.id || operationBusy) return;
   await withProjectOperation('作品を削除中…', async () => {
     const d = await db(), deleting = project.id, old = JSON.parse(snapshotProject()), oldMeta = await idbGet('projectMeta', project.id);
     const remain = (await readAll('projects')).filter(st => st.id !== deleting);
@@ -10875,7 +10920,7 @@ $('deleteProjectBtn').onclick = async () => {
     historyByProject.delete(deleting); historyByProject.set(next.id, { undo: [], redo: [], current: snapshotProject() });
     await garbageCollect(); await updateProjectSheet(); setProjectStatus('作品を削除しました');
   });
-};
+}
 $('exportProjectBtn').onclick = async () => { if (operationBusy) return; await withProjectOperation('バックアップを作成中…', async () => { const estimate = recalculateAssetBytes(); if (estimate >= 512 * 1024 * 1024 && !confirm(`約${prettyBytes(estimate)}の非圧縮バックアップを作ります。元素材と同程度の大きさになります。続けますか？`)) { setProjectStatus('バックアップを取り消しました'); return; } const blob = await createHikariPackage(); if (backupUrl) URL.revokeObjectURL(backupUrl); backupUrl = URL.createObjectURL(blob); const link = $('backupLink'); link.href = backupUrl; link.download = `${(project.name || 'ひかり').replace(/[\\/:*?"<>|]/g, '_')}.hikari`; link.hidden = false; link.click(); setProjectStatus(`バックアップを作成しました（${prettyBytes(blob.size)}）`); }); };
 $('importProjectBtn').onclick = () => { if (!operationBusy) $('projectFileInput').click(); };
 $('projectFileInput').onchange = async e => { const f = e.target.files[0]; if (!f) return; await withProjectOperation('読込みを検証中…', async () => { await importHikariPackage(f); setProjectStatus('新しい作品として読み込みました'); }); e.target.value = ''; };
